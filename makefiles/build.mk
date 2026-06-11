@@ -10,6 +10,13 @@ else
 GO_BUILD_FLAGS = -trimpath -ldflags "-w -s $(GOLDFLAGS)"
 endif
 
+GO_MOD_VERSION := $(shell awk '/^go[[:space:]]+/ { print $$2; exit }' go.mod)
+ifeq ($(strip $(GO_MOD_VERSION)),)
+$(error failed to determine Go version from go.mod)
+endif
+GOTOOLCHAIN_VERSION := go$(GO_MOD_VERSION)
+MODERNIZE_ENV := GOTOOLCHAIN=$(GOTOOLCHAIN_VERSION)
+
 .PHONY: build-go
 build-go:
 	go mod tidy
@@ -18,12 +25,6 @@ build-go:
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build $(GO_BUILD_FLAGS) -buildmode=pie -o $(CURDIR)/dist/images/kube-ovn-daemon -v ./cmd/daemon
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build $(GO_BUILD_FLAGS) -buildmode=pie -o $(CURDIR)/dist/images/kube-ovn-controller -v ./cmd/controller
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build $(GO_BUILD_FLAGS) -o $(CURDIR)/dist/images/test-server -v ./test/server
-
-.PHONY: build-go-windows
-build-go-windows:
-	go mod tidy
-	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build $(GO_BUILD_FLAGS) -o $(CURDIR)/dist/windows/kube-ovn.exe -v ./cmd/cni
-	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build $(GO_BUILD_FLAGS) -buildmode=pie -o $(CURDIR)/dist/windows/kube-ovn-daemon.exe -v ./cmd/daemon
 
 .PHONY: build-go-arm
 build-go-arm:
@@ -91,7 +92,7 @@ image-kube-ovn-dpdk: build-go
 image-vpc-nat-gateway:
 	docker buildx build --platform linux/amd64 -t $(REGISTRY)/vpc-nat-gateway:$(RELEASE_TAG) -o type=docker -f dist/images/vpcnatgateway/Dockerfile dist/images/vpcnatgateway
 
-.PHOONY: image-test
+.PHONY: image-test
 image-test: build-go
 	docker buildx build --platform linux/amd64 -t $(REGISTRY)/test:$(RELEASE_TAG) -o type=docker -f dist/images/Dockerfile.test dist/images/
 
@@ -147,19 +148,12 @@ lint:
     ifeq ($(CI),true)
 		@echo "Running in GitHub Actions"
 		golangci-lint run -v
-		go run golang.org/x/tools/gopls/internal/analysis/modernize/cmd/modernize@latest -test ./...
+		$(MODERNIZE_ENV) go tool github.com/kubeovn/kube-ovn/tools/modernize -test -skipgenerated ./...
     else
 		@echo "Running in local environment"
 		golangci-lint run -v --fix
-		go run golang.org/x/tools/gopls/internal/analysis/modernize/cmd/modernize@latest -test --fix ./...
+		$(MODERNIZE_ENV) go tool github.com/kubeovn/kube-ovn/tools/modernize -test -skipgenerated -fix ./...
     endif
-
-.PHONY: lint-windows
-lint-windows:
-	@GOOS=windows go vet ./cmd/daemon/...
-	@GOOS=windows gosec ./pkg/util
-	@GOOS=windows gosec ./pkg/request
-	@GOOS=windows gosec ./cmd/cni
 
 .PHONY: scan
 scan:

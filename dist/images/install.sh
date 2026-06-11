@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+REGISTRY="docker.io/kubeovn"
+VERSION="v1.15.0"
+
+DEL_NON_HOST_NET_POD=${DEL_NON_HOST_NET_POD:-true}
 IPV6=${IPV6:-false}
 DUAL_STACK=${DUAL_STACK:-false}
 ENABLE_SSL=${ENABLE_SSL:-false}
@@ -73,9 +77,7 @@ LOG_DIR=${LOG_DIR:-/var/log}
 CNI_CONF_DIR="/etc/cni/net.d"
 CNI_BIN_DIR="/opt/cni/bin"
 
-REGISTRY="docker.io/kubeovn"
 VPC_NAT_IMAGE="vpc-nat-gateway"
-VERSION="v1.15.0"
 IMAGE_PULL_POLICY="IfNotPresent"
 POD_CIDR="10.16.0.0/16"                     # Do NOT overlap with NODE/SVC/JOIN CIDR
 POD_GATEWAY="10.16.0.1"
@@ -105,8 +107,8 @@ fi
 EXCLUDE_IPS=""                                    # EXCLUDE_IPS for default subnet
 LABEL="node-role.kubernetes.io/control-plane"     # The node label to deploy OVN DB
 DEPRECATED_LABEL="node-role.kubernetes.io/master" # The node label to deploy OVN DB in earlier versions
-NETWORK_TYPE="geneve"                             # geneve or vlan
-TUNNEL_TYPE="geneve"                              # geneve, vxlan or stt. ATTENTION: some networkpolicy cannot take effect when using vxlan and stt need custom compile ovs kernel module
+NETWORK_TYPE="geneve"                             # vlan or (geneve, vxlan or stt)
+TUNNEL_TYPE="geneve"                              # (geneve, vxlan or stt). ATTENTION: some networkpolicy cannot take effect when using vxlan and stt need custom compile ovs kernel module
 POD_NIC_TYPE="veth-pair"                          # veth-pair or internal-port
 
 # VLAN Config only take effect when NETWORK_TYPE is vlan
@@ -289,6 +291,7 @@ spec:
                   type: string
                 replicas:
                   type: integer
+                  format: int32
                   minimum: 1
                   maximum: 3
             status:
@@ -367,12 +370,14 @@ spec:
                         type: string
                       port:
                         type: integer
+                        format: int32
                         minimum: 1
                         maximum: 65535
                       protocol:
                         type: string
                       targetPort:
                         type: integer
+                        format: int32
                         minimum: 1
                         maximum: 65535
                     type: object
@@ -452,6 +457,8 @@ spec:
                         enum:
                           - Equal
                           - Exists
+                          - Lt
+                          - Gt
                       value:
                         type: string
                       effect:
@@ -461,6 +468,7 @@ spec:
                           - NoSchedule
                           - PreferNoSchedule
                       tolerationSeconds:
+                        format: int64
                         type: integer
                 affinity:
                   properties:
@@ -506,6 +514,7 @@ spec:
                                 type: object
                               weight:
                                 type: integer
+                                format: int32
                                 minimum: 1
                                 maximum: 100
                             required:
@@ -570,8 +579,6 @@ spec:
                                           properties:
                                             key:
                                               type: string
-                                              x-kubernetes-patch-strategy: merge
-                                              x-kubernetes-patch-merge-key: key
                                             operator:
                                               type: string
                                             values:
@@ -583,6 +590,9 @@ spec:
                                             - operator
                                           type: object
                                         type: array
+                                        x-kubernetes-list-type: map
+                                        x-kubernetes-list-map-keys:
+                                          - key
                                       matchLabels:
                                         additionalProperties:
                                           type: string
@@ -599,6 +609,7 @@ spec:
                                 type: object
                               weight:
                                 type: integer
+                                format: int32
                                 minimum: 1
                                 maximum: 100
                             required:
@@ -616,8 +627,6 @@ spec:
                                       properties:
                                         key:
                                           type: string
-                                          x-kubernetes-patch-strategy: merge
-                                          x-kubernetes-patch-merge-key: key
                                         operator:
                                           type: string
                                         values:
@@ -629,6 +638,9 @@ spec:
                                         - operator
                                       type: object
                                     type: array
+                                    x-kubernetes-list-type: map
+                                    x-kubernetes-list-map-keys:
+                                      - key
                                   matchLabels:
                                     additionalProperties:
                                       type: string
@@ -659,8 +671,6 @@ spec:
                                           properties:
                                             key:
                                               type: string
-                                              x-kubernetes-patch-strategy: merge
-                                              x-kubernetes-patch-merge-key: key
                                             operator:
                                               type: string
                                             values:
@@ -672,6 +682,9 @@ spec:
                                             - operator
                                           type: object
                                         type: array
+                                        x-kubernetes-list-type: map
+                                        x-kubernetes-list-map-keys:
+                                          - key
                                       matchLabels:
                                         additionalProperties:
                                           type: string
@@ -688,6 +701,7 @@ spec:
                                 type: object
                               weight:
                                 type: integer
+                                format: int32
                                 minimum: 1
                                 maximum: 100
                             required:
@@ -705,8 +719,6 @@ spec:
                                       properties:
                                         key:
                                           type: string
-                                          x-kubernetes-patch-strategy: merge
-                                          x-kubernetes-patch-merge-key: key
                                         operator:
                                           type: string
                                         values:
@@ -718,6 +730,9 @@ spec:
                                         - operator
                                       type: object
                                     type: array
+                                    x-kubernetes-list-type: map
+                                    x-kubernetes-list-map-keys:
+                                      - key
                                   matchLabels:
                                     additionalProperties:
                                       type: string
@@ -763,8 +778,10 @@ spec:
                       type: boolean
                     asn:
                       type: integer
+                      format: uint32
                     remoteAsn:
                       type: integer
+                      format: uint32
                     neighbors:
                       type: array
                       items:
@@ -803,6 +820,8 @@ spec:
                         enum:
                           - Equal
                           - Exists
+                          - Lt
+                          - Gt
                       value:
                         type: string
                       effect:
@@ -812,6 +831,7 @@ spec:
                           - NoSchedule
                           - PreferNoSchedule
                       tolerationSeconds:
+                        format: int64
                         type: integer
                 affinity:
                   properties:
@@ -857,6 +877,7 @@ spec:
                                 type: object
                               weight:
                                 type: integer
+                                format: int32
                                 minimum: 1
                                 maximum: 100
                             required:
@@ -921,8 +942,6 @@ spec:
                                           properties:
                                             key:
                                               type: string
-                                              x-kubernetes-patch-strategy: merge
-                                              x-kubernetes-patch-merge-key: key
                                             operator:
                                               type: string
                                             values:
@@ -934,6 +953,9 @@ spec:
                                             - operator
                                           type: object
                                         type: array
+                                        x-kubernetes-list-type: map
+                                        x-kubernetes-list-map-keys:
+                                          - key
                                       matchLabels:
                                         additionalProperties:
                                           type: string
@@ -950,6 +972,7 @@ spec:
                                 type: object
                               weight:
                                 type: integer
+                                format: int32
                                 minimum: 1
                                 maximum: 100
                             required:
@@ -967,8 +990,6 @@ spec:
                                       properties:
                                         key:
                                           type: string
-                                          x-kubernetes-patch-strategy: merge
-                                          x-kubernetes-patch-merge-key: key
                                         operator:
                                           type: string
                                         values:
@@ -980,6 +1001,9 @@ spec:
                                         - operator
                                       type: object
                                     type: array
+                                    x-kubernetes-list-type: map
+                                    x-kubernetes-list-map-keys:
+                                      - key
                                   matchLabels:
                                     additionalProperties:
                                       type: string
@@ -1010,8 +1034,6 @@ spec:
                                           properties:
                                             key:
                                               type: string
-                                              x-kubernetes-patch-strategy: merge
-                                              x-kubernetes-patch-merge-key: key
                                             operator:
                                               type: string
                                             values:
@@ -1023,6 +1045,9 @@ spec:
                                             - operator
                                           type: object
                                         type: array
+                                        x-kubernetes-list-type: map
+                                        x-kubernetes-list-map-keys:
+                                          - key
                                       matchLabels:
                                         additionalProperties:
                                           type: string
@@ -1039,6 +1064,7 @@ spec:
                                 type: object
                               weight:
                                 type: integer
+                                format: int32
                                 minimum: 1
                                 maximum: 100
                             required:
@@ -1056,8 +1082,6 @@ spec:
                                       properties:
                                         key:
                                           type: string
-                                          x-kubernetes-patch-strategy: merge
-                                          x-kubernetes-patch-merge-key: key
                                         operator:
                                           type: string
                                         values:
@@ -1069,6 +1093,9 @@ spec:
                                         - operator
                                       type: object
                                     type: array
+                                    x-kubernetes-list-type: map
+                                    x-kubernetes-list-map-keys:
+                                      - key
                                   matchLabels:
                                     additionalProperties:
                                       type: string
@@ -1157,6 +1184,7 @@ spec:
               properties:
                 replicas:
                   type: integer
+                  format: int32
                   minimum: 0
                   maximum: 10
                 labelSelector:
@@ -1174,6 +1202,7 @@ spec:
                         maxLength: 32768
                         type: string
                       observedGeneration:
+                        format: int64
                         minimum: 0
                         type: integer
                       reason:
@@ -1254,6 +1283,7 @@ spec:
               properties:
                 replicas:
                   type: integer
+                  format: int32
                   default: 1
                   minimum: 0
                   maximum: 10
@@ -1301,16 +1331,19 @@ spec:
                       default: false
                     minRX:
                       type: integer
+                      format: int32
                       default: 1000
                       minimum: 1
                       maximum: 3600000
                     minTX:
                       type: integer
+                      format: int32
                       default: 1000
                       minimum: 1
                       maximum: 3600000
                     multiplier:
                       type: integer
+                      format: int32
                       default: 3
                       minimum: 1
                       maximum: 3600000
@@ -1460,6 +1493,55 @@ spec:
                           required:
                             - key
                             - operator
+                tolerations:
+                  description: optional tolerations applied to the workload pods
+                  items:
+                    description: |-
+                      The pod this Toleration is attached to tolerates any taint that matches
+                      the triple <key,value,effect> using the matching operator <operator>.
+                    properties:
+                      effect:
+                        description: |-
+                          Effect indicates the taint effect to match. Empty means match all taint effects.
+                          When specified, allowed values are NoSchedule, PreferNoSchedule and NoExecute.
+                        type: string
+                        enum:
+                          - NoSchedule
+                          - PreferNoSchedule
+                          - NoExecute
+                      key:
+                        description: |-
+                          Key is the taint key that the toleration applies to. Empty means match all taint keys.
+                          If the key is empty, operator must be Exists; this combination means to match all values and all keys.
+                        type: string
+                      operator:
+                        description: |-
+                          Operator represents a key's relationship to the value.
+                          Valid operators are Exists, Equal, Lt, and Gt. Defaults to Equal.
+                          Exists is equivalent to wildcard for value, so that a pod can
+                          tolerate all taints of a particular category.
+                          Lt and Gt perform numeric comparisons (requires feature gate TaintTolerationComparisonOperators).
+                        type: string
+                        enum:
+                          - Exists
+                          - Equal
+                          - Lt
+                          - Gt
+                      tolerationSeconds:
+                        description: |-
+                          TolerationSeconds represents the period of time the toleration (which must be
+                          of effect NoExecute, otherwise this field is ignored) tolerates the taint. By default,
+                          it is not set, which means tolerate the taint forever (do not evict). Zero and
+                          negative values will be treated as 0 (evict immediately) by the system.
+                        format: int64
+                        type: integer
+                      value:
+                        description: |-
+                          Value is the taint value the toleration matches to.
+                          If the operator is Exists, the value should be empty, otherwise just a regular string.
+                        type: string
+                    type: object
+                  type: array
 ---
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
@@ -2293,6 +2375,8 @@ spec:
                     properties:
                       priority:
                         type: integer
+                        min: 0
+                        max: 32767
                       action:
                         type: string
                       match:
@@ -2785,6 +2869,28 @@ spec:
                     type: string
                 gatewayNode:
                   type: string
+                gatewayNodeSelectors:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      matchLabels:
+                        type: object
+                        additionalProperties:
+                          type: string
+                      matchExpressions:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            key:
+                              type: string
+                            operator:
+                              type: string
+                            values:
+                              type: array
+                              items:
+                                type: string
                 natOutgoing:
                   type: boolean
                 externalEgressGateway:
@@ -2906,6 +3012,8 @@ spec:
                               type: array
                               items:
                                 type: string
+                nodeNetwork:
+                  type: string
   scope: Cluster
   names:
     plural: subnets
@@ -2930,6 +3038,9 @@ spec:
       - name: Subnet
         type: string
         jsonPath: .spec.subnet
+      - name: enableAddressSet
+        type: boolean
+        jsonPath: .spec.enableAddressSet
       - name: IPs
         type: string
         jsonPath: .spec.ips
@@ -2974,6 +3085,10 @@ spec:
                       - format: cidr
                       - pattern: ^(?:(?:[01]?\d{1,2}|2[0-4]\d|25[0-5])\.){3}(?:[01]?\d{1,2}|2[0-4]\d|25[0-5])\.\.(?:(?:[01]?\d{1,2}|2[0-4]\d|25[0-5])\.){3}(?:[01]?\d{1,2}|2[0-4]\d|25[0-5])$
                       - pattern: ^((([0-9A-Fa-f]{1,4}:){7}([0-9A-Fa-f]{1,4}|:))|(([0-9A-Fa-f]{1,4}:){6}(:[0-9A-Fa-f]{1,4}|:))|(([0-9A-Fa-f]{1,4}:){5}(((:[0-9A-Fa-f]{1,4}){1,2})|:))|(([0-9A-Fa-f]{1,4}:){4}(((:[0-9A-Fa-f]{1,4}){1,3})|:))|(([0-9A-Fa-f]{1,4}:){3}(((:[0-9A-Fa-f]{1,4}){1,4})|:))|(([0-9A-Fa-f]{1,4}:){2}(((:[0-9A-Fa-f]{1,4}){1,5})|:))|(([0-9A-Fa-f]{1,4}:){1}(((:[0-9A-Fa-f]{1,4}){1,6})|:))|(:(((:[0-9A-Fa-f]{1,4}){1,7})|:)))\.\.((([0-9A-Fa-f]{1,4}:){7}([0-9A-Fa-f]{1,4}|:))|(([0-9A-Fa-f]{1,4}:){6}(:[0-9A-Fa-f]{1,4}|:))|(([0-9A-Fa-f]{1,4}:){5}(((:[0-9A-Fa-f]{1,4}){1,2})|:))|(([0-9A-Fa-f]{1,4}:){4}(((:[0-9A-Fa-f]{1,4}){1,3})|:))|(([0-9A-Fa-f]{1,4}:){3}(((:[0-9A-Fa-f]{1,4}){1,4})|:))|(([0-9A-Fa-f]{1,4}:){2}(((:[0-9A-Fa-f]{1,4}){1,5})|:))|(([0-9A-Fa-f]{1,4}:){1}(((:[0-9A-Fa-f]{1,4}){1,6})|:))|(:(((:[0-9A-Fa-f]{1,4}){1,7})|:)))$
+                enableAddressSet:
+                  type: boolean
+                  default: false
+                  description: EnableAddressSet to work with policy-based routing and ACL
               required:
                 - subnet
                 - ips
@@ -3135,8 +3250,6 @@ spec:
                         properties:
                           key:
                             type: string
-                            x-kubernetes-patch-strategy: merge
-                            x-kubernetes-patch-merge-key: key
                           operator:
                             type: string
                           values:
@@ -3148,6 +3261,9 @@ spec:
                           - operator
                         type: object
                       type: array
+                      x-kubernetes-list-type: map
+                      x-kubernetes-list-map-keys:
+                        - key
                     matchLabels:
                       additionalProperties:
                         type: string
@@ -3157,6 +3273,17 @@ spec:
                   type: array
                   items:
                     type: string
+                autoCreateVlanSubinterfaces:
+                  type: boolean
+                preserveVlanInterfaces:
+                  type: boolean
+                  description: Enable automatic detection and preservation of VLAN interfaces
+                vlanInterfaces:
+                  type: array
+                  items:
+                    type: string
+                    pattern: '^[a-zA-Z0-9_-]+\.[0-9]{1,4}$'
+                  description: Optional explicit list of VLAN interface names to preserve (e.g., eth0.10, bond0.20)
               required:
                 - defaultInterface
             status:
@@ -3245,6 +3372,8 @@ spec:
                         type: string
                       priority:
                         type: integer
+                        min: 1
+                        max: 200
                       remoteType:
                         type: string
                       remoteAddress:
@@ -3253,8 +3382,12 @@ spec:
                         type: string
                       portRangeMin:
                         type: integer
+                        min: 1
+                        max: 65535
                       portRangeMax:
                         type: integer
+                        min: 1
+                        max: 65535
                       policy:
                         type: string
                 egressRules:
@@ -3268,6 +3401,8 @@ spec:
                         type: string
                       priority:
                         type: integer
+                        min: 1
+                        max: 200
                       remoteType:
                         type: string
                       remoteAddress:
@@ -3276,8 +3411,12 @@ spec:
                         type: string
                       portRangeMin:
                         type: integer
+                        min: 1
+                        max: 65535
                       portRangeMax:
                         type: integer
+                        min: 1
+                        max: 65535
                       policy:
                         type: string
                 allowSameGroupTraffic:
@@ -3420,6 +3559,7 @@ kind: ServiceAccount
 metadata:
   name: ovn-ovs
   namespace: kube-system
+automountServiceAccountToken: false
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -3476,6 +3616,7 @@ kind: ServiceAccount
 metadata:
   name: ovn
   namespace: kube-system
+automountServiceAccountToken: false
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -3663,6 +3804,7 @@ rules:
     resources:
       - adminnetworkpolicies
       - baselineadminnetworkpolicies
+      - clusternetworkpolicies
     verbs:
       - get
       - list
@@ -3760,6 +3902,7 @@ kind: ServiceAccount
 metadata:
   name: kube-ovn-cni
   namespace: kube-system
+automountServiceAccountToken: false
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -3914,6 +4057,7 @@ kind: ServiceAccount
 metadata:
   name: kube-ovn-app
   namespace: kube-system
+automountServiceAccountToken: false
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -4082,7 +4226,11 @@ spec:
               topologyKey: kubernetes.io/hostname
       priorityClassName: system-cluster-critical
       serviceAccountName: ovn-ovs
+      automountServiceAccountToken: true
       hostNetwork: true
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
       initContainers:
         - name: hostpath-init
           image: "$REGISTRY/kube-ovn:$VERSION"
@@ -4246,8 +4394,12 @@ spec:
           operator: Exists
       priorityClassName: system-node-critical
       serviceAccountName: ovn-ovs
+      automountServiceAccountToken: true
       hostNetwork: true
       hostPID: true
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
       initContainers:
         - name: hostpath-init
           image: "$REGISTRY/kube-ovn:$VERSION"
@@ -4255,6 +4407,7 @@ spec:
             - sh
             - -xec
             - |
+              chmod +t /usr/local/sbin
               chown -R nobody: /var/run/ovn /var/log/ovn /etc/openvswitch /var/run/openvswitch /var/log/openvswitch
               iptables -V
               /usr/share/openvswitch/scripts/ovs-ctl load-kmod
@@ -4316,7 +4469,7 @@ spec:
               value: "$HW_OFFLOAD"
             - name: TUNNEL_TYPE
               value: "$TUNNEL_TYPE"
-            - name: KUBE_NODE_NAME
+            - name: NODE_NAME
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
@@ -4440,8 +4593,12 @@ spec:
       - operator: Exists
       priorityClassName: system-node-critical
       serviceAccountName: ovn-ovs
+      automountServiceAccountToken: true
       hostNetwork: true
       hostPID: true
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: openvswitch
           image: "$REGISTRY/kube-ovn:${DPDK_TAG}"
@@ -4463,7 +4620,7 @@ spec:
               value: "$TUNNEL_TYPE"
             - name: DPDK_TUNNEL_IFACE
               value: "$DPDK_TUNNEL_IFACE"
-            - name: KUBE_NODE_NAME
+            - name: NODE_NAME
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
@@ -4653,7 +4810,11 @@ spec:
               topologyKey: kubernetes.io/hostname
       priorityClassName: system-cluster-critical
       serviceAccountName: ovn
+      automountServiceAccountToken: true
       hostNetwork: true
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
       initContainers:
         - name: hostpath-init
           image: "$REGISTRY/kube-ovn:$VERSION"
@@ -4736,11 +4897,7 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
-            - name: KUBE_NAMESPACE
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.namespace
-            - name: KUBE_NODE_NAME
+            - name: NODE_NAME
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
@@ -4837,15 +4994,21 @@ spec:
           operator: Exists
       priorityClassName: system-node-critical
       serviceAccountName: kube-ovn-cni
+      automountServiceAccountToken: true
       hostNetwork: true
       hostPID: true
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
       initContainers:
       - name: hostpath-init
         image: "$REGISTRY/kube-ovn:$VERSION"
         command:
           - sh
           - -xec
-          - iptables -V
+          - |
+            chmod +t /usr/local/sbin
+            iptables -V
         securityContext:
           allowPrivilegeEscalation: true
           capabilities:
@@ -4870,6 +5033,11 @@ spec:
         command:
           - /kube-ovn/install-cni.sh
           - --cni-conf-name=${CNI_CONFIG_PRIORITY}-kube-ovn.conflist
+        env:
+          - name: POD_IPS
+            valueFrom:
+              fieldRef:
+                fieldPath: status.podIPs
         securityContext:
           runAsUser: 0
           privileged: true
@@ -4928,7 +5096,7 @@ spec:
             valueFrom:
               fieldRef:
                 fieldPath: status.podIP
-          - name: KUBE_NODE_NAME
+          - name: NODE_NAME
             valueFrom:
               fieldRef:
                 fieldPath: spec.nodeName
@@ -5066,155 +5234,6 @@ spec:
             path: /usr/local/bin
 
 ---
-kind: DaemonSet
-apiVersion: apps/v1
-metadata:
-  name: kube-ovn-pinger
-  namespace: kube-system
-  annotations:
-    kubernetes.io/description: |
-      This daemon set launches the pinger daemon.
-spec:
-  selector:
-    matchLabels:
-      app: kube-ovn-pinger
-  updateStrategy:
-    type: RollingUpdate
-  template:
-    metadata:
-      labels:
-        app: kube-ovn-pinger
-        component: network
-        type: infra
-    spec:
-      priorityClassName: system-node-critical
-      serviceAccountName: kube-ovn-app
-      hostPID: true
-      initContainers:
-        - name: hostpath-init
-          image: "$REGISTRY/kube-ovn:$VERSION"
-          command:
-            - sh
-            - -c
-            - "chown -R nobody: /var/log/kube-ovn"
-          securityContext:
-            allowPrivilegeEscalation: true
-            capabilities:
-              drop:
-                - ALL
-            privileged: true
-            runAsUser: 0
-          volumeMounts:
-            - name: kube-ovn-log
-              mountPath: /var/log/kube-ovn
-      containers:
-        - name: pinger
-          image: "$REGISTRY/kube-ovn:$VERSION"
-          command:
-          - /kube-ovn/kube-ovn-pinger
-          args:
-          - --external-address=$PINGER_EXTERNAL_ADDRESS
-          - --external-dns=$PINGER_EXTERNAL_DOMAIN
-          - --logtostderr=false
-          - --alsologtostderr=true
-          - --log_file=/var/log/kube-ovn/kube-ovn-pinger.log
-          - --log_file_max_size=200
-          - --enable-metrics=$ENABLE_METRICS
-          imagePullPolicy: $IMAGE_PULL_POLICY
-          securityContext:
-            runAsUser: ${RUN_AS_USER}
-            privileged: false
-            capabilities:
-              add:
-                - NET_BIND_SERVICE
-                - NET_RAW
-          env:
-            - name: ENABLE_SSL
-              value: "$ENABLE_SSL"
-            - name: POD_IP
-              valueFrom:
-                fieldRef:
-                  fieldPath: status.podIP
-            - name: HOST_IP
-              valueFrom:
-                fieldRef:
-                  fieldPath: status.hostIP
-            - name: POD_NAME
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.name
-            - name: NODE_NAME
-              valueFrom:
-                fieldRef:
-                  fieldPath: spec.nodeName
-          volumeMounts:
-            - mountPath: /var/run/openvswitch
-              name: host-run-ovs
-            - mountPath: /var/run/ovn
-              name: host-run-ovn
-            - mountPath: /etc/openvswitch
-              name: host-config-openvswitch
-            - mountPath: /var/log/openvswitch
-              name: host-log-ovs
-              readOnly: true
-            - mountPath: /var/log/ovn
-              name: host-log-ovn
-              readOnly: true
-            - mountPath: /var/log/kube-ovn
-              name: kube-ovn-log
-            - mountPath: /etc/localtime
-              name: localtime
-              readOnly: true
-            - mountPath: /var/run/tls
-              name: kube-ovn-tls
-          resources:
-            requests:
-              cpu: 100m
-              memory: 100Mi
-            limits:
-              cpu: 200m
-              memory: 400Mi
-          livenessProbe:
-            httpGet:
-              path: /metrics
-              port: 8080
-            initialDelaySeconds: 15
-            periodSeconds: 20
-          readinessProbe:
-            httpGet:
-              path: /metrics
-              port: 8080
-            initialDelaySeconds: 5
-            periodSeconds: 10
-      nodeSelector:
-        kubernetes.io/os: "linux"
-      volumes:
-        - name: host-run-ovs
-          hostPath:
-            path: /run/openvswitch
-        - name: host-run-ovn
-          hostPath:
-            path: /run/ovn
-        - name: host-config-openvswitch
-          hostPath:
-            path: /etc/origin/openvswitch
-        - name: host-log-ovs
-          hostPath:
-            path: $LOG_DIR/openvswitch
-        - name: kube-ovn-log
-          hostPath:
-            path: $LOG_DIR/kube-ovn
-        - name: host-log-ovn
-          hostPath:
-            path: $LOG_DIR/ovn
-        - name: localtime
-          hostPath:
-            path: /etc/localtime
-        - name: kube-ovn-tls
-          secret:
-            optional: true
-            secretName: kube-ovn-tls
----
 kind: Deployment
 apiVersion: apps/v1
 metadata:
@@ -5254,7 +5273,11 @@ spec:
               topologyKey: kubernetes.io/hostname
       priorityClassName: system-cluster-critical
       serviceAccountName: kube-ovn-app
+      automountServiceAccountToken: true
       hostNetwork: true
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
       initContainers:
         - name: hostpath-init
           image: "$REGISTRY/kube-ovn:$VERSION"
@@ -5293,7 +5316,7 @@ spec:
           env:
             - name: ENABLE_SSL
               value: "$ENABLE_SSL"
-            - name: KUBE_NODE_NAME
+            - name: NODE_NAME
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
@@ -5401,21 +5424,6 @@ spec:
 kind: Service
 apiVersion: v1
 metadata:
-  name: kube-ovn-pinger
-  namespace: kube-system
-  labels:
-    app: kube-ovn-pinger
-spec:
-  ${SVC_YAML_IPFAMILYPOLICY}
-  selector:
-    app: kube-ovn-pinger
-  ports:
-    - port: 8080
-      name: metrics
----
-kind: Service
-apiVersion: v1
-metadata:
   name: kube-ovn-controller
   namespace: kube-system
   labels:
@@ -5492,7 +5500,11 @@ spec:
               topologyKey: kubernetes.io/hostname
       priorityClassName: system-cluster-critical
       serviceAccountName: ovn
+      automountServiceAccountToken: true
       hostNetwork: true
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: ovn-ic-controller
           image: "$REGISTRY/kube-ovn:$VERSION"
@@ -5565,12 +5577,26 @@ fi
 echo "-------------------------------"
 echo ""
 
-echo "[Step 4/6] Delete pod that not in host network mode"
-for ns in $(kubectl get ns --no-headers -o custom-columns=NAME:.metadata.name); do
-  for pod in $(kubectl get pod --no-headers -n "$ns" --field-selector spec.restartPolicy=Always -o custom-columns=NAME:.metadata.name,HOST:spec.hostNetwork | awk '{if ($2!="true") print $1}'); do
-    kubectl delete pod "$pod" -n "$ns" --ignore-not-found --wait=false
+echo "Check to delete multus pods to reload CNI config"
+nad_count=$(
+  kubectl get network-attachment-definitions.k8s.cni.cncf.io -A --no-headers 2>/dev/null \
+    | wc -l || true
+)
+nad_count=${nad_count:-0}
+if [[ "$nad_count" -gt 0 ]]; then
+  echo "Detected $nad_count NetworkAttachmentDefinition(s), restarting Multus pods..."
+  kubectl delete pod -n kube-system -l app=multus || true
+  kubectl wait --for=condition=Ready pod -n kube-system -l app=multus --timeout=60s
+fi
+
+if [ "$DEL_NON_HOST_NET_POD" = "true" ]; then
+  echo "[Step 4/6] Delete pod that not in host network mode"
+  for ns in $(kubectl get ns --no-headers -o custom-columns=NAME:.metadata.name); do
+    for pod in $(kubectl get pod --no-headers -n "$ns" --field-selector spec.restartPolicy=Always -o custom-columns=NAME:.metadata.name,HOST:spec.hostNetwork | awk '{if ($2!="true") print $1}'); do
+      kubectl delete pod "$pod" -n "$ns" --ignore-not-found --wait=false
+    done
   done
-done
+fi
 
 kubectl rollout status deployment/coredns -n kube-system --timeout 300s
 while true; do
@@ -5581,6 +5607,185 @@ while true; do
   echo "Waiting for ${pods[@]} to be deleted..."
   sleep 1
 done
+
+echo "Install Kube-ovn-pinger"
+cat <<EOF > kube-ovn-pinger.yaml
+---
+kind: Service
+apiVersion: v1
+metadata:
+  name: kube-ovn-pinger
+  namespace: kube-system
+  labels:
+    app: kube-ovn-pinger
+spec:
+  ${SVC_YAML_IPFAMILYPOLICY}
+  selector:
+    app: kube-ovn-pinger
+  ports:
+    - port: 8080
+      name: metrics
+
+---
+kind: DaemonSet
+apiVersion: apps/v1
+metadata:
+  name: kube-ovn-pinger
+  namespace: kube-system
+  annotations:
+    kubernetes.io/description: |
+      This daemon set launches the pinger daemon.
+spec:
+  selector:
+    matchLabels:
+      app: kube-ovn-pinger
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app: kube-ovn-pinger
+        component: network
+        type: infra
+    spec:
+      priorityClassName: system-node-critical
+      serviceAccountName: kube-ovn-app
+      automountServiceAccountToken: true
+      hostPID: false
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: hostpath-init
+          image: "$REGISTRY/kube-ovn:$VERSION"
+          command:
+            - sh
+            - -c
+            - "chown -R nobody: /var/log/kube-ovn"
+          securityContext:
+            allowPrivilegeEscalation: true
+            capabilities:
+              drop:
+                - ALL
+            privileged: true
+            runAsUser: 0
+          volumeMounts:
+            - name: kube-ovn-log
+              mountPath: /var/log/kube-ovn
+      containers:
+        - name: pinger
+          image: "$REGISTRY/kube-ovn:$VERSION"
+          command:
+          - /kube-ovn/kube-ovn-pinger
+          args:
+          - --external-address=$PINGER_EXTERNAL_ADDRESS
+          - --external-dns=$PINGER_EXTERNAL_DOMAIN
+          - --logtostderr=false
+          - --alsologtostderr=true
+          - --log_file=/var/log/kube-ovn/kube-ovn-pinger.log
+          - --log_file_max_size=200
+          - --enable-metrics=$ENABLE_METRICS
+          imagePullPolicy: $IMAGE_PULL_POLICY
+          securityContext:
+            runAsUser: ${RUN_AS_USER}
+            privileged: false
+            capabilities:
+              add:
+                - NET_BIND_SERVICE
+                - NET_RAW
+          env:
+            - name: ENABLE_SSL
+              value: "$ENABLE_SSL"
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: HOST_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          volumeMounts:
+            - mountPath: /var/run/openvswitch
+              name: host-run-ovs
+            - mountPath: /var/run/ovn
+              name: host-run-ovn
+            - mountPath: /etc/openvswitch
+              name: host-config-openvswitch
+            - mountPath: /var/log/openvswitch
+              name: host-log-ovs
+              readOnly: true
+            - mountPath: /var/log/ovn
+              name: host-log-ovn
+              readOnly: true
+            - mountPath: /var/log/kube-ovn
+              name: kube-ovn-log
+            - mountPath: /etc/localtime
+              name: localtime
+              readOnly: true
+            - mountPath: /var/run/tls
+              name: kube-ovn-tls
+          resources:
+            requests:
+              cpu: 100m
+              memory: 100Mi
+            limits:
+              cpu: 200m
+              memory: 400Mi
+          livenessProbe:
+            httpGet:
+              path: /metrics
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /metrics
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      nodeSelector:
+        kubernetes.io/os: "linux"
+      volumes:
+        - name: host-run-ovs
+          hostPath:
+            path: /run/openvswitch
+        - name: host-run-ovn
+          hostPath:
+            path: /run/ovn
+        - name: host-config-openvswitch
+          hostPath:
+            path: /etc/origin/openvswitch
+        - name: host-log-ovs
+          hostPath:
+            path: $LOG_DIR/openvswitch
+        - name: kube-ovn-log
+          hostPath:
+            path: $LOG_DIR/kube-ovn
+        - name: host-log-ovn
+          hostPath:
+            path: $LOG_DIR/ovn
+        - name: localtime
+          hostPath:
+            path: /etc/localtime
+        - name: kube-ovn-tls
+          secret:
+            optional: true
+            secretName: kube-ovn-tls
+EOF
+
+kubectl apply -f kube-ovn-pinger.yaml
 kubectl rollout status daemonset/kube-ovn-pinger -n kube-system --timeout 120s
 sleep 1
 kubectl wait pod --for=condition=Ready -l app=kube-ovn-pinger -n kube-system --timeout 120s

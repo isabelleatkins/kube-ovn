@@ -525,10 +525,7 @@ false
   "images": {
     "kubeovn": {
       "repository": "kube-ovn",
-      "support_arm": true,
-      "tag": "v1.14.0",
-      "thirdparty": true,
-      "vpcRepository": "vpc-nat-gateway"
+      "tag": "v1.14.0"
     }
   },
   "registry": {
@@ -651,6 +648,15 @@ false
 </pre>
 </td>
 			<td>Location of the CNI configuration inside the agent's pod.</td>
+		</tr>
+		<tr>
+			<td>cni.mountConfigDirectory</td>
+			<td>string</td>
+			<td><pre lang="json">
+"/etc/cni/net.d"
+</pre>
+</td>
+			<td>Location of the CNI configuration to be mounted inside the pod.</td>
 		</tr>
 		<tr>
 			<td>cni.mountToolingDirectory</td>
@@ -1176,6 +1182,42 @@ false
 			<td>Image tag.</td>
 		</tr>
 		<tr>
+			<td>natGw.image</td>
+			<td>object</td>
+			<td><pre lang="">
+"{}"
+</pre>
+</td>
+			<td>Image used by the NAT gateway.</td>
+		</tr>
+		<tr>
+			<td>natGw.image.pullPolicy</td>
+			<td>string</td>
+			<td><pre lang="json">
+"IfNotPresent"
+</pre>
+</td>
+			<td>Image pull policy.</td>
+		</tr>
+		<tr>
+			<td>natGw.image.repository</td>
+			<td>string</td>
+			<td><pre lang="json">
+"docker.io/kubeovn/vpc-nat-gateway"
+</pre>
+</td>
+			<td>Image repository.</td>
+		</tr>
+		<tr>
+			<td>natGw.image.tag</td>
+			<td>string</td>
+			<td><pre lang="json">
+"v1.15.0"
+</pre>
+</td>
+			<td>Image tag.</td>
+		</tr>
+		<tr>
 			<td>natGw.namePrefix</td>
 			<td>string</td>
 			<td><pre lang="json">
@@ -1511,6 +1553,15 @@ false
 </pre>
 </td>
 			<td>IPv6 CIDR.</td>
+		</tr>
+		<tr>
+			<td>networking.skipConntrackDstCidrs</td>
+			<td>string</td>
+			<td><pre lang="json">
+""
+</pre>
+</td>
+			<td>Comma-separated list of destination IP CIDRs that should skip conntrack processing.</td>
 		</tr>
 		<tr>
 			<td>networking.stack</td>

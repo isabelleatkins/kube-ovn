@@ -17,6 +17,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
+	kubevirtv1 "kubevirt.io/api/core/v1"
 
 	kubeovnv1 "github.com/kubeovn/kube-ovn/pkg/apis/kubeovn/v1"
 	clientset "github.com/kubeovn/kube-ovn/pkg/client/clientset/versioned"
@@ -91,7 +92,7 @@ func (csh cniServerHandler) handleAdd(req *restful.Request, resp *restful.Respon
 	var gatewayCheckMode int
 	var macAddr, ip, ipAddr, cidr, gw, subnet, ingress, egress, providerNetwork, ifName, nicType, podNicName, vmName, latency, limit, loss, jitter, u2oInterconnectionIP, oldPodName string
 	var routes []request.Route
-	var isDefaultRoute bool
+	var isDefaultRoute, noIPAM bool
 	var pod *v1.Pod
 	var err error
 	for range 20 {
@@ -130,7 +131,7 @@ func (csh cniServerHandler) handleAdd(req *restful.Request, resp *restful.Respon
 		jitter = pod.Annotations[fmt.Sprintf(util.NetemQosJitterAnnotationTemplate, podRequest.Provider)]
 		providerNetwork = pod.Annotations[fmt.Sprintf(util.ProviderNetworkTemplate, podRequest.Provider)]
 		vmName = pod.Annotations[fmt.Sprintf(util.VMAnnotationTemplate, podRequest.Provider)]
-		ipAddr, err = util.GetIPAddrWithMask(ip, cidr)
+		ipAddr, noIPAM, err = util.GetIPAddrWithMaskForCNI(ip, cidr)
 		if err != nil {
 			errMsg := fmt.Errorf("failed to get ip address with mask, %w", err)
 			klog.Error(errMsg)
@@ -210,11 +211,13 @@ func (csh cniServerHandler) handleAdd(req *restful.Request, resp *restful.Respon
 	if subnet == "" && podSubnet != nil {
 		subnet = podSubnet.Name
 	}
-	if err := csh.UpdateIPCR(podRequest, subnet, ip); err != nil {
-		if err := resp.WriteHeaderAndEntity(http.StatusInternalServerError, request.CniResponse{Err: err.Error()}); err != nil {
-			klog.Errorf("failed to write response, %v", err)
+	if !noIPAM {
+		if err := csh.UpdateIPCR(podRequest, subnet, ip); err != nil {
+			if err := resp.WriteHeaderAndEntity(http.StatusInternalServerError, request.CniResponse{Err: err.Error()}); err != nil {
+				klog.Errorf("failed to write response, %v", err)
+			}
+			return
 		}
-		return
 	}
 
 	if isDefaultRoute && pod.Annotations[fmt.Sprintf(util.RoutedAnnotationTemplate, podRequest.Provider)] != "true" && util.IsOvnProvider(podRequest.Provider) {
@@ -252,7 +255,7 @@ func (csh cniServerHandler) handleAdd(req *restful.Request, resp *restful.Respon
 		var vmMigration bool
 		subnetHasVlan := podSubnet.Spec.Vlan != ""
 		// skip ping check gateway for pods during live migration
-		if pod.Annotations[util.MigrationJobAnnotation] == "" {
+		if pod.Annotations[kubevirtv1.MigrationJobNameAnnotation] == "" {
 			if subnetHasVlan && !podSubnet.Spec.LogicalGateway {
 				if podSubnet.Spec.DisableGatewayCheck {
 					gatewayCheckMode = gatewayCheckModeArpingNotConcerned
@@ -305,12 +308,26 @@ func (csh cniServerHandler) handleAdd(req *restful.Request, resp *restful.Respon
 		macAddr = pod.Annotations[fmt.Sprintf(util.MacAddressAnnotationTemplate, podRequest.Provider)]
 		klog.Infof("create container interface %s mac %s, ip %s, cidr %s, gw %s, custom routes %v", ifName, macAddr, ipAddr, cidr, gw, routes)
 		podNicName = ifName
+
+		var encapIP string
+		if podSubnet.Spec.NodeNetwork != "" {
+			encapIP, err = csh.Config.GetEncapIPByNetwork(podSubnet.Spec.NodeNetwork)
+			if err != nil {
+				errMsg := fmt.Errorf("failed to get encap IP for node network %s: %w", podSubnet.Spec.NodeNetwork, err)
+				klog.Error(errMsg)
+				if err = resp.WriteHeaderAndEntity(http.StatusInternalServerError, request.CniResponse{Err: errMsg.Error()}); err != nil {
+					klog.Errorf("failed to write response: %v", err)
+				}
+				return
+			}
+		}
+
 		switch nicType {
 		case util.DpdkType:
 			err = csh.configureDpdkNic(podRequest.PodName, podRequest.PodNamespace, podRequest.Provider, podRequest.NetNs, podRequest.ContainerID, ifName, macAddr, mtu, ipAddr, gw, ingress, egress, getShortSharedDir(pod.UID, podRequest.VhostUserSocketVolumeName), podRequest.VhostUserSocketName, podRequest.VhostUserSocketConsumption)
 			routes = nil
 		default:
-			routes, err = csh.configureNic(podRequest.PodName, podRequest.PodNamespace, podRequest.Provider, podRequest.NetNs, podRequest.ContainerID, podRequest.VfDriver, ifName, macAddr, mtu, ipAddr, gw, isDefaultRoute, vmMigration, routes, podRequest.DNS.Nameservers, podRequest.DNS.Search, ingress, egress, podRequest.DeviceID, latency, limit, loss, jitter, gatewayCheckMode, u2oInterconnectionIP, oldPodName)
+			routes, err = csh.configureNic(podRequest.PodName, podRequest.PodNamespace, podRequest.Provider, podRequest.NetNs, podRequest.ContainerID, podRequest.VfDriver, ifName, macAddr, mtu, ipAddr, gw, isDefaultRoute, vmMigration, routes, podRequest.DNS.Nameservers, podRequest.DNS.Search, ingress, egress, podRequest.DeviceID, latency, limit, loss, jitter, gatewayCheckMode, u2oInterconnectionIP, oldPodName, encapIP)
 		}
 		if err != nil {
 			errMsg := fmt.Errorf("configure nic %s for pod %s/%s failed: %w", ifName, podRequest.PodName, podRequest.PodNamespace, err)

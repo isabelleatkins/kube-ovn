@@ -14,6 +14,8 @@ import (
 	"time"
 	"unicode"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/klog/v2"
 
 	kubeovnv1 "github.com/kubeovn/kube-ovn/pkg/apis/kubeovn/v1"
@@ -332,6 +334,20 @@ func GetStringIP(v4IP, v6IP string) string {
 	return strings.Join(ipList, ",")
 }
 
+// GetIPAddrWithMaskForCNI returns IP address with mask for CNI plugin.
+// When ip is empty, it indicates no-IPAM mode (e.g., NAT gateway macvlan without default EIP).
+// Returns (ipAddr, noIPAM, error) where noIPAM is true when IP allocation is skipped.
+func GetIPAddrWithMaskForCNI(ip, cidr string) (string, bool, error) {
+	if ip == "" {
+		// Network attachment definition using no-IPAM plugin (e.g., NAT gateway net1 macvlan with no default EIP)
+		// IP is not allocated by Kube-OVN, but cidr still comes from subnet configuration
+		klog.V(3).Infof("skipping IP allocation: ip is empty for cidr %s (no-IPAM mode)", cidr)
+		return "", true, nil
+	}
+	ipAddr, err := GetIPAddrWithMask(ip, cidr)
+	return ipAddr, false, err
+}
+
 func GetIPAddrWithMask(ip, cidr string) (string, error) {
 	var ipAddr string
 	ips := strings.Split(ip, ",")
@@ -489,6 +505,20 @@ func GatewayContains(gatewayNodeStr, gateway string) bool {
 			gw = strings.TrimSpace(gw)
 		}
 		if gw == strings.TrimSpace(gateway) {
+			return true
+		}
+	}
+	return false
+}
+
+func MatchLabelSelectors(selectors []metav1.LabelSelector, nodeLabels map[string]string) bool {
+	for _, selector := range selectors {
+		labelSelector, err := metav1.LabelSelectorAsSelector(&selector)
+		if err != nil {
+			klog.Errorf("failed to convert label selector: %v", err)
+			continue
+		}
+		if labelSelector.Matches(labels.Set(nodeLabels)) {
 			return true
 		}
 	}
@@ -720,7 +750,7 @@ func UDPConnectivityListen(endpoint string) error {
 
 func GetDefaultListenAddr() []string {
 	if os.Getenv("ENABLE_BIND_LOCAL_IP") == "true" {
-		if podIPs := os.Getenv("POD_IPS"); podIPs != "" {
+		if podIPs := os.Getenv(EnvPodIPs); podIPs != "" {
 			return strings.Split(podIPs, ",")
 		}
 		klog.Error("environment variable POD_IPS is not set, cannot bind to local ip")

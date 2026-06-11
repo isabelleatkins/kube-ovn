@@ -20,21 +20,21 @@ CONTROL_PLANE_TAINTS = node-role.kubernetes.io/master node-role.kubernetes.io/co
 FRR_VERSION = 9.1.3
 FRR_IMAGE = quay.io/frrouting/frr:$(FRR_VERSION)
 
-CLAB_IMAGE = ghcr.io/srl-labs/clab:0.68.0
+CLAB_IMAGE = ghcr.io/srl-labs/clab:0.72.0
 
 # renovate: datasource=github-releases depName=multus packageName=k8snetworkplumbingwg/multus-cni
-MULTUS_VERSION = v4.2.2
+MULTUS_VERSION = v4.2.3
 MULTUS_IMAGE = ghcr.io/k8snetworkplumbingwg/multus-cni:$(MULTUS_VERSION)-thick
 MULTUS_YAML = https://raw.githubusercontent.com/k8snetworkplumbingwg/multus-cni/$(MULTUS_VERSION)/deployments/multus-daemonset-thick.yml
 
 # renovate: datasource=github-releases depName=metallb packageName=metallb/metallb
-METALLB_VERSION = v0.15.2
+METALLB_VERSION = v0.15.3
 METALLB_CHART_REPO = https://metallb.github.io/metallb
 METALLB_CONTROLLER_IMAGE = quay.io/metallb/controller:$(METALLB_VERSION)
 METALLB_SPEAKER_IMAGE = quay.io/metallb/speaker:$(METALLB_VERSION)
 
 # renovate: datasource=github-releases depName=kubevirt packageName=kubevirt/kubevirt
-KUBEVIRT_VERSION = v1.6.2
+KUBEVIRT_VERSION = v1.7.0
 KUBEVIRT_OPERATOR_IMAGE = quay.io/kubevirt/virt-operator:$(KUBEVIRT_VERSION)
 KUBEVIRT_API_IMAGE = quay.io/kubevirt/virt-api:$(KUBEVIRT_VERSION)
 KUBEVIRT_CONTROLLER_IMAGE = quay.io/kubevirt/virt-controller:$(KUBEVIRT_VERSION)
@@ -44,11 +44,11 @@ KUBEVIRT_OPERATOR_YAML = https://github.com/kubevirt/kubevirt/releases/download/
 KUBEVIRT_CR_YAML = https://github.com/kubevirt/kubevirt/releases/download/$(KUBEVIRT_VERSION)/kubevirt-cr.yaml
 
 # renovate: datasource=github-releases depName=cilium packageName=cilium/cilium
-CILIUM_VERSION = v1.18.3
+CILIUM_VERSION = v1.18.5
 CILIUM_IMAGE_REPO = quay.io/cilium
 
 # renovate: datasource=github-releases depName=cert-manager packageName=cert-manager/cert-manager
-CERT_MANAGER_VERSION = v1.19.1
+CERT_MANAGER_VERSION = v1.19.2
 CERT_MANAGER_CONTROLLER = quay.io/jetstack/cert-manager-controller:$(CERT_MANAGER_VERSION)
 CERT_MANAGER_CAINJECTOR = quay.io/jetstack/cert-manager-cainjector:$(CERT_MANAGER_VERSION)
 CERT_MANAGER_WEBHOOK = quay.io/jetstack/cert-manager-webhook:$(CERT_MANAGER_VERSION)
@@ -81,6 +81,8 @@ ANP_TEST_IMAGE = registry.k8s.io/e2e-test-images/agnhost:2.45
 NETWORK_POLICY_API_VERSION = v0.1.7
 ANP_CR_YAML = https://raw.githubusercontent.com/kubernetes-sigs/network-policy-api/refs/tags/$(NETWORK_POLICY_API_VERSION)/config/crd/experimental/policy.networking.k8s.io_adminnetworkpolicies.yaml
 BANP_CR_YAML = https://raw.githubusercontent.com/kubernetes-sigs/network-policy-api/refs/tags/$(NETWORK_POLICY_API_VERSION)/config/crd/experimental/policy.networking.k8s.io_baselineadminnetworkpolicies.yaml
+CNP_CR_YAML = https://raw.githubusercontent.com/kubernetes-sigs/network-policy-api/refs/heads/main/config/crd/experimental/policy.networking.k8s.io_clusternetworkpolicies.yaml
+
 define docker_ensure_image_exists
 	if ! docker images --format "{{.Repository}}:{{.Tag}}" | grep "^$(1)$$" >/dev/null; then \
 		docker pull "$(1)"; \
@@ -208,7 +210,9 @@ install-chart:
 		--set func.ENABLE_OVN_IPSEC=$(or $(ENABLE_OVN_IPSEC),false) \
 		--set func.ENABLE_TPROXY=$(or $(ENABLE_TPROXY),false) \
 		--set func.ENABLE_IC=$(shell kubectl get node --show-labels | grep -qw "ovn.kubernetes.io/ic-gw" && echo true || echo false) \
-		--set func.ENABLE_ANP=$(or $(ENABLE_ANP),false)
+		--set func.ENABLE_ANP=$(or $(ENABLE_ANP),false) \
+		--set cni_conf.NON_PRIMARY_CNI=$(or $(ENABLE_NON_PRIMARY_CNI),false) \
+		--set cni_conf.CNI_CONFIG_PRIORITY=$(or $(CNI_CONFIG_PRIORITY),01)
 
 .PHONY: upgrade-chart
 upgrade-chart:
@@ -237,17 +241,25 @@ upgrade-chart:
 		--set func.ENABLE_OVN_IPSEC=$(or $(ENABLE_OVN_IPSEC),false) \
 		--set func.ENABLE_TPROXY=$(or $(ENABLE_TPROXY),false) \
 		--set func.ENABLE_IC=$(shell kubectl get node --show-labels | grep -qw "ovn.kubernetes.io/ic-gw" && echo true || echo false) \
-		--set func.ENABLE_ANP=$(or $(ENABLE_ANP),false)
+		--set func.ENABLE_ANP=$(or $(ENABLE_ANP),false) \
+		--set cni_conf.NON_PRIMARY_CNI=$(or $(ENABLE_NON_PRIMARY_CNI),false) \
+		--set cni_conf.CNI_CONFIG_PRIORITY=$(or $(CNI_CONFIG_PRIORITY),01)
 	kubectl -n kube-system wait pod --for=condition=ready -l app=ovs --timeout=60s
 
 .PHONY: install-chart-v2
 install-chart-v2:
 	kubectl label node --overwrite -l node-role.kubernetes.io/control-plane kube-ovn/role=master
-	helm install kubeovn ./charts/kube-ovn-v2 --wait
+	helm install kubeovn ./charts/kube-ovn-v2 --wait \
+		--set global.images.kubeovn.tag=$(VERSION) \
+		--set cni.nonPrimaryCNI=$(or $(ENABLE_NON_PRIMARY_CNI),false) \
+		--set cni.configPriority=$(or $(CNI_CONFIG_PRIORITY),01)
 
 .PHONY: upgrade-chart-v2
 upgrade-chart-v2:
-	helm upgrade kubeovn ./charts/kube-ovn-v2 --wait
+	helm upgrade kubeovn ./charts/kube-ovn-v2 --wait \
+		--set global.images.kubeovn.tag=$(VERSION) \
+		--set cni.nonPrimaryCNI=$(or $(ENABLE_NON_PRIMARY_CNI),false) \
+		--set cni.configPriority=$(or $(CNI_CONFIG_PRIORITY),01)
 	kubectl -n kube-system wait pod --for=condition=ready -l app=ovs --timeout=60s
 
 .PHONY: uninstall

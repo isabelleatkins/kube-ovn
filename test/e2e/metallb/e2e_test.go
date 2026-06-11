@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	dockernetwork "github.com/docker/docker/api/types/network"
+	dockernetwork "github.com/moby/moby/api/types/network"
 	"github.com/onsi/ginkgo/v2"
 	metallbv1beta1 "go.universe.tf/metallb/api/v1beta1"
 	corev1 "k8s.io/api/core/v1"
@@ -22,6 +22,7 @@ import (
 	k8sframework "k8s.io/kubernetes/test/e2e/framework"
 	"k8s.io/kubernetes/test/e2e/framework/config"
 	e2enode "k8s.io/kubernetes/test/e2e/framework/node"
+	"k8s.io/utils/ptr"
 
 	apiv1 "github.com/kubeovn/kube-ovn/pkg/apis/kubeovn/v1"
 	"github.com/kubeovn/kube-ovn/pkg/ipam"
@@ -144,7 +145,7 @@ var _ = framework.Describe("[group:metallb]", func() {
 			routes, err := node.ListRoutes(true)
 			framework.ExpectNoError(err, "failed to list routes on node %s: %v", node.Name(), err)
 			for _, link := range links {
-				if link.Address == node.NetworkSettings.Networks[dockerNetworkName].MacAddress {
+				if link.Address == node.NetworkSettings.Networks[dockerNetworkName].MacAddress.String() {
 					linkMap[node.ID] = &link
 					break
 				}
@@ -175,7 +176,7 @@ var _ = framework.Describe("[group:metallb]", func() {
 		containerID = containerInfo.ID
 		ContainerInspect, err := docker.ContainerInspect(containerID)
 		framework.ExpectNoError(err)
-		clientip = ContainerInspect.NetworkSettings.Networks[dockerNetworkName].IPAddress
+		clientip = ContainerInspect.NetworkSettings.Networks[dockerNetworkName].IPAddress.String()
 	})
 	ginkgo.AfterEach(func() {
 		ginkgo.By("Delete service")
@@ -251,16 +252,16 @@ var _ = framework.Describe("[group:metallb]", func() {
 		ginkgo.By("Creating underlay subnet " + subnetName)
 		var cidrV4, cidrV6, gatewayV4, gatewayV6 string
 		for _, config := range dockerNetwork.IPAM.Config {
-			switch util.CheckProtocol(config.Subnet) {
+			switch util.CheckProtocol(config.Subnet.String()) {
 			case apiv1.ProtocolIPv4:
 				if f.HasIPv4() {
-					cidrV4 = config.Subnet
-					gatewayV4 = config.Gateway
+					cidrV4 = config.Subnet.String()
+					gatewayV4 = config.Gateway.String()
 				}
 			case apiv1.ProtocolIPv6:
 				if f.HasIPv6() {
-					cidrV6 = config.Subnet
-					gatewayV6 = config.Gateway
+					cidrV6 = config.Subnet.String()
+					gatewayV6 = config.Gateway.String()
 				}
 			}
 		}
@@ -288,14 +289,14 @@ var _ = framework.Describe("[group:metallb]", func() {
 
 		excludeIPs := make([]string, 0, len(network.Containers)*2)
 		for _, container := range network.Containers {
-			if container.IPv4Address != "" && f.HasIPv4() {
-				excludeIPs = append(excludeIPs, strings.Split(container.IPv4Address, "/")[0])
+			if container.IPv4Address.IsValid() && f.HasIPv4() {
+				excludeIPs = append(excludeIPs, container.IPv4Address.Addr().String())
 				if len(metallbVIPv4s) > 0 {
 					excludeIPs = append(excludeIPs, metallbVIPv4s...)
 				}
 			}
-			if container.IPv6Address != "" && f.HasIPv6() {
-				excludeIPs = append(excludeIPs, strings.Split(container.IPv6Address, "/")[0])
+			if container.IPv6Address.IsValid() && f.HasIPv6() {
+				excludeIPs = append(excludeIPs, container.IPv6Address.Addr().String())
 				if len(metallbVIPv6s) > 0 {
 					excludeIPs = append(excludeIPs, metallbVIPv6s...)
 				}
@@ -358,6 +359,7 @@ var _ = framework.Describe("[group:metallb]", func() {
 			},
 		}
 		service := framework.MakeService(serviceName, corev1.ServiceTypeLoadBalancer, nil, podLabels, ports, "")
+		service.Spec.IPFamilyPolicy = ptr.To(corev1.IPFamilyPolicySingleStack)
 		service.Spec.ExternalTrafficPolicy = corev1.ServiceExternalTrafficPolicyTypeLocal
 		_ = serviceClient.CreateSync(service, func(s *corev1.Service) (bool, error) {
 			return len(s.Status.LoadBalancer.Ingress) != 0, nil
@@ -365,6 +367,7 @@ var _ = framework.Describe("[group:metallb]", func() {
 
 		ginkgo.By("Creating the second service for the same deployment")
 		service2 := framework.MakeService(serviceName2, corev1.ServiceTypeLoadBalancer, nil, podLabels, ports, "")
+		service2.Spec.IPFamilyPolicy = ptr.To(corev1.IPFamilyPolicySingleStack)
 		service2.Spec.ExternalTrafficPolicy = corev1.ServiceExternalTrafficPolicyTypeLocal
 		_ = serviceClient.CreateSync(service2, func(s *corev1.Service) (bool, error) {
 			return len(s.Status.LoadBalancer.Ingress) != 0, nil
@@ -437,7 +440,7 @@ func checkReachable(f *framework.Framework, containerID, sourceIP, targetIP, tar
 	framework.ExpectNoError(err, "getting nodes in kind cluster")
 	for _, node := range nodes {
 		for _, networkSettings := range node.NetworkSettings.Networks {
-			if networkSettings.MacAddress == vipMac {
+			if networkSettings.MacAddress.String() == vipMac {
 				vipNode = node.Name()
 				break
 			}

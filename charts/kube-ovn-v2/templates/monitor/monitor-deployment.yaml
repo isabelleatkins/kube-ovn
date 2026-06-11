@@ -45,6 +45,7 @@ spec:
         - key: CriticalAddonsOnly
           operator: Exists
       affinity:
+        {{- include "kube-ovn.affinities.nodeAffinity" (dict "userPreferred" .Values.monitor.nodeAffinity.preferredDuringSchedulingIgnoredDuringExecution "userRequired" .Values.monitor.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution) | nindent 8 -}}
         podAntiAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
             - labelSelector:
@@ -53,7 +54,11 @@ spec:
               topologyKey: kubernetes.io/hostname
       priorityClassName: system-cluster-critical
       serviceAccountName: kube-ovn-app
+      automountServiceAccountToken: true
       hostNetwork: true
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
       initContainers:
         - name: hostpath-init
           image: {{ .Values.global.registry.address }}/{{ .Values.global.images.kubeovn.repository }}:{{ .Values.global.images.kubeovn.tag }}
@@ -93,7 +98,7 @@ spec:
           env:
             - name: ENABLE_SSL
               value: "{{ .Values.networking.enableSsl }}"
-            - name: KUBE_NODE_NAME
+            - name: NODE_NAME
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName

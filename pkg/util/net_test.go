@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	kubeovnv1 "github.com/kubeovn/kube-ovn/pkg/apis/kubeovn/v1"
 )
@@ -936,6 +937,90 @@ func TestGetIPAddrWithMask(t *testing.T) {
 	}
 }
 
+func TestGetIPAddrWithMaskForCNI(t *testing.T) {
+	tests := []struct {
+		name      string
+		ip        string
+		cidr      string
+		wantAddr  string
+		wantNoIP  bool
+		wantError bool
+	}{
+		{
+			name:      "Normal IPv4 address",
+			ip:        "192.168.1.1",
+			cidr:      "192.168.1.0/24",
+			wantAddr:  "192.168.1.1/24",
+			wantNoIP:  false,
+			wantError: false,
+		},
+		{
+			name:      "Normal IPv6 address",
+			ip:        "2001:db8::1",
+			cidr:      "2001:db8::/32",
+			wantAddr:  "2001:db8::1/32",
+			wantNoIP:  false,
+			wantError: false,
+		},
+		{
+			name:      "Dual stack addresses",
+			ip:        "192.168.1.1,2001:db8::1",
+			cidr:      "192.168.1.0/24,2001:db8::/32",
+			wantAddr:  "192.168.1.1/24,2001:db8::1/32",
+			wantNoIP:  false,
+			wantError: false,
+		},
+		{
+			name:      "No-IPAM mode (empty IP with CIDR)",
+			ip:        "",
+			cidr:      "192.168.1.0/24",
+			wantAddr:  "",
+			wantNoIP:  true,
+			wantError: false,
+		},
+		{
+			name:      "No-IPAM mode (empty IP with dual-stack CIDR)",
+			ip:        "",
+			cidr:      "192.168.1.0/24,2001:db8::/32",
+			wantAddr:  "",
+			wantNoIP:  true,
+			wantError: false,
+		},
+		{
+			name:      "Error: invalid dual stack ip format",
+			ip:        "192.168.1.1",
+			cidr:      "192.168.1.0/24,2001:db8::/32",
+			wantAddr:  "",
+			wantNoIP:  false,
+			wantError: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotAddr, gotNoIP, gotErr := GetIPAddrWithMaskForCNI(tt.ip, tt.cidr)
+
+			if tt.wantError {
+				if gotErr == nil {
+					t.Errorf("GetIPAddrWithMaskForCNI() expected error but got nil")
+				}
+			} else {
+				if gotErr != nil {
+					t.Errorf("GetIPAddrWithMaskForCNI() unexpected error: %v", gotErr)
+				}
+			}
+
+			if gotAddr != tt.wantAddr {
+				t.Errorf("GetIPAddrWithMaskForCNI() gotAddr = %v, want %v", gotAddr, tt.wantAddr)
+			}
+
+			if gotNoIP != tt.wantNoIP {
+				t.Errorf("GetIPAddrWithMaskForCNI() gotNoIP = %v, want %v", gotNoIP, tt.wantNoIP)
+			}
+		})
+	}
+}
+
 func TestGetIPWithoutMask(t *testing.T) {
 	tests := []struct {
 		name string
@@ -1159,6 +1244,170 @@ func TestGatewayContains(t *testing.T) {
 			if ans != c.want {
 				t.Errorf("%v, %v expected %v but %v got",
 					c.gatewayNodeStr, c.gateway, c.want, ans)
+			}
+		})
+	}
+}
+
+func TestMatchLabelSelectors(t *testing.T) {
+	tests := []struct {
+		name       string
+		selectors  []metav1.LabelSelector
+		nodeLabels map[string]string
+		want       bool
+	}{
+		{
+			name:       "empty selectors",
+			selectors:  []metav1.LabelSelector{},
+			nodeLabels: map[string]string{"role": "gateway"},
+			want:       false,
+		},
+		{
+			name: "match single label",
+			selectors: []metav1.LabelSelector{
+				{MatchLabels: map[string]string{"role": "gateway"}},
+			},
+			nodeLabels: map[string]string{"role": "gateway", "zone": "us-west"},
+			want:       true,
+		},
+		{
+			name: "no match single label",
+			selectors: []metav1.LabelSelector{
+				{MatchLabels: map[string]string{"role": "gateway"}},
+			},
+			nodeLabels: map[string]string{"role": "worker", "zone": "us-west"},
+			want:       false,
+		},
+		{
+			name: "match multiple labels",
+			selectors: []metav1.LabelSelector{
+				{MatchLabels: map[string]string{"role": "gateway", "zone": "us-west"}},
+			},
+			nodeLabels: map[string]string{"role": "gateway", "zone": "us-west", "env": "prod"},
+			want:       true,
+		},
+		{
+			name: "partial match multiple labels",
+			selectors: []metav1.LabelSelector{
+				{MatchLabels: map[string]string{"role": "gateway", "zone": "us-east"}},
+			},
+			nodeLabels: map[string]string{"role": "gateway", "zone": "us-west"},
+			want:       false,
+		},
+		{
+			name: "match with expressions - In operator",
+			selectors: []metav1.LabelSelector{
+				{
+					MatchExpressions: []metav1.LabelSelectorRequirement{
+						{Key: "role", Operator: metav1.LabelSelectorOpIn, Values: []string{"gateway", "master"}},
+					},
+				},
+			},
+			nodeLabels: map[string]string{"role": "gateway"},
+			want:       true,
+		},
+		{
+			name: "no match with expressions - In operator",
+			selectors: []metav1.LabelSelector{
+				{
+					MatchExpressions: []metav1.LabelSelectorRequirement{
+						{Key: "role", Operator: metav1.LabelSelectorOpIn, Values: []string{"gateway", "master"}},
+					},
+				},
+			},
+			nodeLabels: map[string]string{"role": "worker"},
+			want:       false,
+		},
+		{
+			name: "match with expressions - NotIn operator",
+			selectors: []metav1.LabelSelector{
+				{
+					MatchExpressions: []metav1.LabelSelectorRequirement{
+						{Key: "role", Operator: metav1.LabelSelectorOpNotIn, Values: []string{"worker"}},
+					},
+				},
+			},
+			nodeLabels: map[string]string{"role": "gateway"},
+			want:       true,
+		},
+		{
+			name: "match with expressions - Exists operator",
+			selectors: []metav1.LabelSelector{
+				{
+					MatchExpressions: []metav1.LabelSelectorRequirement{
+						{Key: "role", Operator: metav1.LabelSelectorOpExists},
+					},
+				},
+			},
+			nodeLabels: map[string]string{"role": "gateway"},
+			want:       true,
+		},
+		{
+			name: "no match with expressions - Exists operator",
+			selectors: []metav1.LabelSelector{
+				{
+					MatchExpressions: []metav1.LabelSelectorRequirement{
+						{Key: "role", Operator: metav1.LabelSelectorOpExists},
+					},
+				},
+			},
+			nodeLabels: map[string]string{"zone": "us-west"},
+			want:       false,
+		},
+		{
+			name: "match any selector in list",
+			selectors: []metav1.LabelSelector{
+				{MatchLabels: map[string]string{"role": "master"}},
+				{MatchLabels: map[string]string{"role": "gateway"}},
+			},
+			nodeLabels: map[string]string{"role": "gateway"},
+			want:       true,
+		},
+		{
+			name: "match first selector in list",
+			selectors: []metav1.LabelSelector{
+				{MatchLabels: map[string]string{"role": "gateway"}},
+				{MatchLabels: map[string]string{"role": "master"}},
+			},
+			nodeLabels: map[string]string{"role": "gateway"},
+			want:       true,
+		},
+		{
+			name: "no match any selector in list",
+			selectors: []metav1.LabelSelector{
+				{MatchLabels: map[string]string{"role": "master"}},
+				{MatchLabels: map[string]string{"role": "control-plane"}},
+			},
+			nodeLabels: map[string]string{"role": "gateway"},
+			want:       false,
+		},
+		{
+			name:       "empty node labels",
+			selectors:  []metav1.LabelSelector{{MatchLabels: map[string]string{"role": "gateway"}}},
+			nodeLabels: map[string]string{},
+			want:       false,
+		},
+		{
+			name:       "nil node labels",
+			selectors:  []metav1.LabelSelector{{MatchLabels: map[string]string{"role": "gateway"}}},
+			nodeLabels: nil,
+			want:       false,
+		},
+		{
+			name: "empty selector matches all",
+			selectors: []metav1.LabelSelector{
+				{},
+			},
+			nodeLabels: map[string]string{"role": "gateway"},
+			want:       true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := MatchLabelSelectors(tt.selectors, tt.nodeLabels)
+			if got != tt.want {
+				t.Errorf("MatchLabelSelectors() = %v, want %v", got, tt.want)
 			}
 		})
 	}

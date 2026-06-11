@@ -38,7 +38,7 @@ type OvnClientTestSuite struct {
 }
 
 func emptyNbDatabaseModel() (model.ClientDBModel, error) {
-	return model.NewClientDBModel("OVN_Northbound", map[string]model.Model{})
+	return model.NewClientDBModel(ovnnb.DatabaseName, nil)
 }
 
 func (suite *OvnClientTestSuite) SetupSuite() {
@@ -397,10 +397,6 @@ func (suite *OvnClientTestSuite) Test_getLogicalRouterPort() {
 
 func (suite *OvnClientTestSuite) Test_getLogicalRouterPortByUUID() {
 	suite.testGetLogicalRouterPortByUUID()
-}
-
-func (suite *OvnClientTestSuite) Test_addLogicalRouterPort() {
-	suite.testAddLogicalRouterPort()
 }
 
 func (suite *OvnClientTestSuite) Test_DeleteLogicalRouterPorts() {
@@ -815,6 +811,10 @@ func (suite *OvnClientTestSuite) Test_UpdateAnpRuleACLOps() {
 	suite.testUpdateAnpRuleACLOps()
 }
 
+func (suite *OvnClientTestSuite) Test_UpdateCnpRuleACLOps() {
+	suite.testUpdateCnpRuleACLOps()
+}
+
 func (suite *OvnClientTestSuite) Test_UpdateACL() {
 	suite.testUpdateACL()
 }
@@ -1054,6 +1054,27 @@ func (suite *OvnClientTestSuite) Test_NewOvnNbClient() {
 
 func (suite *OvnClientTestSuite) Test_NewOvnSbClient() {
 	suite.testNewOvnSbClient()
+}
+
+/* migration unit test */
+func (suite *OvnClientTestSuite) Test_MigrateVendorExternalIDs() {
+	suite.testMigrateVendorExternalIDs()
+}
+
+func (suite *OvnClientTestSuite) Test_MigrateVendorExternalIDsIdempotent() {
+	suite.testMigrateVendorExternalIDsIdempotent()
+}
+
+func (suite *OvnClientTestSuite) Test_MigrateSkipsWhenVersionSet() {
+	suite.testMigrateSkipsWhenVersionSet()
+}
+
+func (suite *OvnClientTestSuite) Test_MigrateRunsWhenOldVersion() {
+	suite.testMigrateRunsWhenOldVersion()
+}
+
+func (suite *OvnClientTestSuite) Test_MigrateVendorExternalIDsSkipsNonKubeOvn() {
+	suite.testMigrateVendorExternalIDsSkipsNonKubeOvn()
 }
 
 /* sb chassis unit test */
@@ -1407,6 +1428,8 @@ func newNbClient(addr string, timeout int) (client.Client, error) {
 		client.WithTable(&ovnnb.NAT{}),
 		client.WithTable(&ovnnb.NBGlobal{}),
 		client.WithTable(&ovnnb.PortGroup{}),
+		client.WithTable(&ovnnb.Meter{}),
+		client.WithTable(&ovnnb.MeterBand{}),
 	}
 	if _, err = c.Monitor(context.TODO(), c.NewMonitor(monitorOpts...)); err != nil {
 		klog.Error(err)

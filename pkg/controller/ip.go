@@ -149,7 +149,9 @@ func (c *Controller) handleAddReservedIP(key string) error {
 		return err
 	}
 
-	if ip.Spec.PodType != "" && ip.Spec.PodType != util.VM && ip.Spec.PodType != util.StatefulSet {
+	if ip.Spec.PodType != "" &&
+		ip.Spec.PodType != util.KindVirtualMachine &&
+		ip.Spec.PodType != util.KindStatefulSet {
 		err := fmt.Errorf("podType %s is not supported", ip.Spec.PodType)
 		klog.Error(err)
 		return err
@@ -327,7 +329,7 @@ func (c *Controller) acquireIPAddress(subnetName, name, nicName string) (string,
 	checkConflict := true
 	var err error
 	for {
-		v4ip, v6ip, mac, err = c.ipam.GetRandomAddress(name, nicName, nil, subnetName, "", skippedAddrs, checkConflict)
+		v4ip, v6ip, mac, err = c.ipam.GetRandomAddress(name, nicName, nil, subnetName, "", skippedAddrs, checkConflict, "")
 		if err != nil {
 			klog.Error(err)
 			return "", "", "", err
@@ -362,7 +364,7 @@ func (c *Controller) acquireStaticIPAddress(subnetName, name, nicName, ip string
 		}
 	}
 
-	if v4ip, v6ip, mac, err = c.ipam.GetStaticAddress(name, nicName, ip, macPointer, subnetName, checkConflict); err != nil {
+	if v4ip, v6ip, mac, err = c.ipam.GetStaticAddress(name, nicName, ip, macPointer, subnetName, checkConflict, ""); err != nil {
 		klog.Errorf("failed to get static virtual ip '%s', mac '%s', subnet '%s', %v", ip, mac, subnetName, err)
 		return "", "", "", err
 	}
@@ -505,7 +507,7 @@ func (c *Controller) ipAcquireAddress(ip *kubeovnv1.IP, subnet *kubeovnv1.Subnet
 		err = fmt.Errorf("failed to get random address for ip %s, %w", ip.Name, err)
 	} else {
 		// static address
-		v4IP, v6IP, mac, err = c.acquireStaticAddress(key, portName, ipStr, macPtr, subnet.Name, true)
+		v4IP, v6IP, mac, err = c.acquireStaticAddress(key, portName, ipStr, macPtr, subnet.Name, true, "")
 		if err == nil {
 			return v4IP, v6IP, mac, nil
 		}

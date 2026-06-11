@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"reflect"
 	"slices"
 	"strconv"
@@ -53,12 +54,27 @@ func nodeReady(node *v1.Node) bool {
 	return ready && !networkUnavailable
 }
 
+func kubeOvnAnnotationsChanged(oldAnnotations, newAnnotations map[string]string) bool {
+	filterKubeOvnAnnotations := func(annotations map[string]string) map[string]string {
+		filtered := make(map[string]string)
+		for key, value := range annotations {
+			if strings.Contains(key, ".kubernetes.io/") {
+				filtered[key] = value
+			}
+		}
+		return filtered
+	}
+
+	return !maps.Equal(filterKubeOvnAnnotations(oldAnnotations), filterKubeOvnAnnotations(newAnnotations))
+}
+
 func (c *Controller) enqueueUpdateNode(oldObj, newObj any) {
 	oldNode := oldObj.(*v1.Node)
 	newNode := newObj.(*v1.Node)
 
 	if nodeReady(oldNode) != nodeReady(newNode) ||
-		!reflect.DeepEqual(oldNode.Annotations, newNode.Annotations) {
+		kubeOvnAnnotationsChanged(oldNode.Annotations, newNode.Annotations) ||
+		!reflect.DeepEqual(oldNode.Labels, newNode.Labels) {
 		key := cache.MetaObjectToName(newNode).String()
 		if len(newNode.Annotations) == 0 || newNode.Annotations[util.AllocatedAnnotation] != "true" {
 			klog.V(3).Infof("enqueue add node %s", key)
@@ -150,13 +166,13 @@ func (c *Controller) handleAddNode(key string) error {
 	if node.Annotations[util.AllocatedAnnotation] == "true" && node.Annotations[util.IPAddressAnnotation] != "" && node.Annotations[util.MacAddressAnnotation] != "" {
 		macStr := node.Annotations[util.MacAddressAnnotation]
 		v4IP, v6IP, mac, err = c.ipam.GetStaticAddress(portName, portName, node.Annotations[util.IPAddressAnnotation],
-			&macStr, node.Annotations[util.LogicalSwitchAnnotation], true)
+			&macStr, node.Annotations[util.LogicalSwitchAnnotation], true, "")
 		if err != nil {
 			klog.Errorf("failed to alloc static ip addrs for node %v: %v", node.Name, err)
 			return err
 		}
 	} else {
-		v4IP, v6IP, mac, err = c.ipam.GetRandomAddress(portName, portName, nil, c.config.NodeSwitch, "", nil, true)
+		v4IP, v6IP, mac, err = c.ipam.GetRandomAddress(portName, portName, nil, c.config.NodeSwitch, "", nil, true, "")
 		if err != nil {
 			klog.Errorf("failed to alloc random ip addrs for node %v: %v", node.Name, err)
 			return err
@@ -257,9 +273,8 @@ func (c *Controller) handleAddNode(key string) error {
 			klog.Errorf("failed to create port group for node %s and subnet %s: %v", node.Name, subnet.Name, err)
 			return err
 		}
-		// policy route for overlay distributed subnet should be reconciled when node ip changed
-		c.addOrUpdateSubnetQueue.Add(subnet.Name)
 	}
+	c.distributedSubnetNeedSync.Store(true)
 
 	// ovn acl doesn't support address_set name with '-', so replace '-' by '.'
 	pgName := strings.ReplaceAll(portName, "-", ".")
@@ -268,7 +283,7 @@ func (c *Controller) handleAddNode(key string) error {
 		return err
 	}
 
-	if err := c.addPolicyRouteForCentralizedSubnetOnNode(node.Name, ipStr); err != nil {
+	if err := c.addPolicyRouteForCentralizedSubnetOnNode(node, ipStr); err != nil {
 		klog.Errorf("failed to add policy route for node %s, %v", key, err)
 		return err
 	}
@@ -544,16 +559,23 @@ func (c *Controller) handleUpdateNode(key string) error {
 		return err
 	}
 
+	c.distributedSubnetNeedSync.Store(true)
+
 	for _, cachedSubnet := range subnets {
-		if cachedSubnet.Spec.GatewayType == kubeovnv1.GWDistributedType {
-			// we need to reconcile ovn route for subnets with distributed gateway mode,
-			// since the informer node cache may not be synced before the subnet reconcile triggered by node addition
+		if cachedSubnet.Spec.GatewayType != kubeovnv1.GWCentralizedType {
+			continue
+		}
+
+		// For subnets using GatewayNodeSelectors, always trigger reconciliation
+		// when node labels change, since the node might have been added or removed
+		// from the gateway list
+		if cachedSubnet.Spec.GatewayNode == "" && len(cachedSubnet.Spec.GatewayNodeSelectors) > 0 {
 			c.addOrUpdateSubnetQueue.Add(cachedSubnet.Name)
 			continue
 		}
-		subnet := cachedSubnet.DeepCopy()
-		if util.GatewayContains(subnet.Spec.GatewayNode, node.Name) {
-			if err := c.reconcileOvnDefaultVpcRoute(subnet); err != nil {
+
+		if util.GatewayContains(cachedSubnet.Spec.GatewayNode, node.Name) {
+			if err := c.reconcileOvnDefaultVpcRoute(cachedSubnet); err != nil {
 				klog.Error(err)
 				return err
 			}
@@ -561,6 +583,33 @@ func (c *Controller) handleUpdateNode(key string) error {
 	}
 
 	return nil
+}
+
+func (c *Controller) syncDistributedSubnetRoutes() {
+	if !c.distributedSubnetNeedSync.Swap(false) {
+		return
+	}
+
+	klog.V(3).Infoln("start to sync distributed subnet routes")
+	subnets, err := c.subnetsLister.List(labels.Everything())
+	if err != nil {
+		klog.Errorf("failed to list subnets: %v", err)
+		c.distributedSubnetNeedSync.Store(true)
+		return
+	}
+
+	for _, subnet := range subnets {
+		if subnet.Spec.Vpc != c.config.ClusterRouter ||
+			subnet.Name == c.config.NodeSwitch ||
+			subnet.Spec.GatewayType != kubeovnv1.GWDistributedType ||
+			(subnet.Spec.Vlan != "" && !subnet.Spec.LogicalGateway) {
+			continue
+		}
+		if err := c.reconcileDistributedSubnetRouteInDefaultVpc(subnet); err != nil {
+			klog.Errorf("failed to reconcile distributed subnet %s route: %v", subnet.Name, err)
+			c.distributedSubnetNeedSync.Store(true)
+		}
+	}
 }
 
 func (c *Controller) checkSubnetGateway() {
@@ -636,7 +685,7 @@ func (c *Controller) checkSubnetGatewayNode() error {
 						if !pingSucceeded || !nodeIsReady {
 							if exist {
 								if !pingSucceeded {
-									klog.Warningf("failed to ping ovn0 ip %s on node %s", ip, node.Name)
+									klog.Warningf("failed to ping %s ip %s on node %s", util.NodeNic, ip, node.Name)
 								}
 								if !nodeIsReady {
 									klog.Warningf("node %s is not ready", node.Name)
@@ -651,7 +700,7 @@ func (c *Controller) checkSubnetGatewayNode() error {
 								}
 							}
 						} else {
-							klog.V(3).Infof("succeeded to ping ovn0 ip %s on node %s", ip, node.Name)
+							klog.V(3).Infof("succeeded to ping %s ip %s on node %s", util.NodeNic, ip, node.Name)
 							if !exist {
 								nextHops.Add(ip)
 								if nameIPMap == nil {
@@ -724,7 +773,7 @@ func (c *Controller) retryDelDupChassis(attempts, sleep int, f func(node *v1.Nod
 func (c *Controller) fetchPodsOnNode(nodeName string, pods []*v1.Pod) ([]string, error) {
 	ports := make([]string, 0, len(pods))
 	for _, pod := range pods {
-		if !isPodAlive(pod) || pod.Spec.HostNetwork || pod.Spec.NodeName != nodeName {
+		if pod.Spec.HostNetwork || pod.Spec.NodeName != nodeName || !isPodAlive(pod) {
 			continue
 		}
 
@@ -1005,7 +1054,7 @@ func (c *Controller) deletePolicyRouteForNode(nodeName, portName string) error {
 	return nil
 }
 
-func (c *Controller) addPolicyRouteForCentralizedSubnetOnNode(nodeName, nodeIP string) error {
+func (c *Controller) addPolicyRouteForCentralizedSubnetOnNode(node *v1.Node, nodeIP string) error {
 	subnets, err := c.subnetsLister.List(labels.Everything())
 	if err != nil {
 		klog.Errorf("failed to get subnets %v", err)
@@ -1016,9 +1065,10 @@ func (c *Controller) addPolicyRouteForCentralizedSubnetOnNode(nodeName, nodeIP s
 		if (subnet.Spec.Vlan != "" && !subnet.Spec.LogicalGateway) || subnet.Spec.Vpc != c.config.ClusterRouter || subnet.Name == c.config.NodeSwitch || subnet.Spec.GatewayType != kubeovnv1.GWCentralizedType {
 			continue
 		}
-
+		nodeName := node.Name
 		if subnet.Spec.EnableEcmp {
-			if !util.GatewayContains(subnet.Spec.GatewayNode, nodeName) {
+			if !util.GatewayContains(subnet.Spec.GatewayNode, nodeName) &&
+				(subnet.Spec.GatewayNode != "" || !util.MatchLabelSelectors(subnet.Spec.GatewayNodeSelectors, node.Labels)) {
 				continue
 			}
 

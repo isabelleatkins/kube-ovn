@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	netAttach "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/client/informers/externalversions"
@@ -12,10 +13,12 @@ import (
 	"github.com/puzpuzpuz/xsync/v4"
 	"golang.org/x/time/rate"
 	corev1 "k8s.io/api/core/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/discovery"
 	kubeinformers "k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes/scheme"
 	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
@@ -29,15 +32,17 @@ import (
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
 	"k8s.io/utils/keymutex"
+	"k8s.io/utils/set"
 	v1alpha1 "sigs.k8s.io/network-policy-api/apis/v1alpha1"
+	netpolv1alpha2 "sigs.k8s.io/network-policy-api/apis/v1alpha2"
 	anpinformer "sigs.k8s.io/network-policy-api/pkg/client/informers/externalversions"
 	anplister "sigs.k8s.io/network-policy-api/pkg/client/listers/apis/v1alpha1"
-
-	"github.com/kubeovn/kube-ovn/pkg/informer"
+	anplisterv1alpha2 "sigs.k8s.io/network-policy-api/pkg/client/listers/apis/v1alpha2"
 
 	kubeovnv1 "github.com/kubeovn/kube-ovn/pkg/apis/kubeovn/v1"
 	kubeovninformer "github.com/kubeovn/kube-ovn/pkg/client/informers/externalversions"
 	kubeovnlister "github.com/kubeovn/kube-ovn/pkg/client/listers/kubeovn/v1"
+	"github.com/kubeovn/kube-ovn/pkg/informer"
 	ovnipam "github.com/kubeovn/kube-ovn/pkg/ipam"
 	"github.com/kubeovn/kube-ovn/pkg/ovs"
 	"github.com/kubeovn/kube-ovn/pkg/util"
@@ -51,11 +56,12 @@ const (
 	portGroupKey                  = "pg"
 	networkPolicyKey              = "np"
 	sgKey                         = "sg"
-	associatedSgKeyPrefix         = "associated_sg_"
 	sgsKey                        = "security_groups"
 	u2oKey                        = "u2o"
 	adminNetworkPolicyKey         = "anp"
 	baselineAdminNetworkPolicyKey = "banp"
+	ippoolKey                     = "ippool"
+	clusterNetworkPolicyKey       = "cnp"
 )
 
 // Controller is kube-ovn main controller that watch ns/pod/node/svc/ep and operate ovn
@@ -66,6 +72,8 @@ type Controller struct {
 	namedPort      *NamedPort
 	anpPrioNameMap map[int32]string
 	anpNamePrioMap map[string]int32
+	bnpPrioNameMap map[int32]string
+	bnpNamePrioMap map[string]int32
 
 	OVNNbClient ovs.NbClient
 	OVNSbClient ovs.SbClient
@@ -123,7 +131,6 @@ type Controller struct {
 	subnetsLister           kubeovnlister.SubnetLister
 	subnetSynced            cache.InformerSynced
 	addOrUpdateSubnetQueue  workqueue.TypedRateLimitingInterface[string]
-	subnetLastVpcNameMap    *xsync.Map[string, string]
 	deleteSubnetQueue       workqueue.TypedRateLimitingInterface[*kubeovnv1.Subnet]
 	updateSubnetStatusQueue workqueue.TypedRateLimitingInterface[string]
 	syncVirtualPortsQueue   workqueue.TypedRateLimitingInterface[string]
@@ -154,7 +161,7 @@ type Controller struct {
 	addIptablesEipQueue    workqueue.TypedRateLimitingInterface[string]
 	updateIptablesEipQueue workqueue.TypedRateLimitingInterface[string]
 	resetIptablesEipQueue  workqueue.TypedRateLimitingInterface[string]
-	delIptablesEipQueue    workqueue.TypedRateLimitingInterface[string]
+	delIptablesEipQueue    workqueue.TypedRateLimitingInterface[*kubeovnv1.IptablesEIP]
 
 	iptablesFipsLister     kubeovnlister.IptablesFIPRuleLister
 	iptablesFipSynced      cache.InformerSynced
@@ -179,7 +186,7 @@ type Controller struct {
 	addOvnEipQueue    workqueue.TypedRateLimitingInterface[string]
 	updateOvnEipQueue workqueue.TypedRateLimitingInterface[string]
 	resetOvnEipQueue  workqueue.TypedRateLimitingInterface[string]
-	delOvnEipQueue    workqueue.TypedRateLimitingInterface[string]
+	delOvnEipQueue    workqueue.TypedRateLimitingInterface[*kubeovnv1.OvnEip]
 
 	ovnFipsLister     kubeovnlister.OvnFipLister
 	ovnFipSynced      cache.InformerSynced
@@ -277,6 +284,13 @@ type Controller struct {
 	deleteBanpQueue workqueue.TypedRateLimitingInterface[*v1alpha1.BaselineAdminNetworkPolicy]
 	banpKeyMutex    keymutex.KeyMutex
 
+	cnpsLister     anplisterv1alpha2.ClusterNetworkPolicyLister
+	cnpsSynced     cache.InformerSynced
+	addCnpQueue    workqueue.TypedRateLimitingInterface[string]
+	updateCnpQueue workqueue.TypedRateLimitingInterface[*ClusterNetworkPolicyChangedDelta]
+	deleteCnpQueue workqueue.TypedRateLimitingInterface[*netpolv1alpha2.ClusterNetworkPolicy]
+	cnpKeyMutex    keymutex.KeyMutex
+
 	csrLister           certListerv1.CertificateSigningRequestLister
 	csrSynced           cache.InformerSynced
 	addOrUpdateCsrQueue workqueue.TypedRateLimitingInterface[string]
@@ -298,6 +312,8 @@ type Controller struct {
 
 	// Database health check
 	dbFailureCount int
+
+	distributedSubnetNeedSync atomic.Bool
 }
 
 func newTypedRateLimitingQueue[T comparable](name string, rateLimiter workqueue.TypedRateLimiter[T]) workqueue.TypedRateLimitingInterface[T] {
@@ -386,6 +402,7 @@ func Run(ctx context.Context, config *Configuration) {
 	ovnDnatRuleInformer := kubeovnInformerFactory.Kubeovn().V1().OvnDnatRules()
 	anpInformer := anpInformerFactory.Policy().V1alpha1().AdminNetworkPolicies()
 	banpInformer := anpInformerFactory.Policy().V1alpha1().BaselineAdminNetworkPolicies()
+	cnpInformer := anpInformerFactory.Policy().V1alpha2().ClusterNetworkPolicies()
 	dnsNameResolverInformer := kubeovnInformerFactory.Kubeovn().V1().DNSNameResolvers()
 	csrInformer := informerFactory.Certificates().V1().CertificateSigningRequests()
 	netAttachInformer := attachNetInformerFactory.K8sCniCncfIo().V1().NetworkAttachmentDefinitions()
@@ -427,7 +444,6 @@ func Run(ctx context.Context, config *Configuration) {
 		subnetsLister:           subnetInformer.Lister(),
 		subnetSynced:            subnetInformer.Informer().HasSynced,
 		addOrUpdateSubnetQueue:  newTypedRateLimitingQueue[string]("AddSubnet", nil),
-		subnetLastVpcNameMap:    xsync.NewMap[string, string](),
 		deleteSubnetQueue:       newTypedRateLimitingQueue[*kubeovnv1.Subnet]("DeleteSubnet", nil),
 		updateSubnetStatusQueue: newTypedRateLimitingQueue[string]("UpdateSubnetStatus", nil),
 		syncVirtualPortsQueue:   newTypedRateLimitingQueue[string]("SyncVirtualPort", nil),
@@ -458,7 +474,7 @@ func Run(ctx context.Context, config *Configuration) {
 		addIptablesEipQueue:    newTypedRateLimitingQueue("AddIptablesEip", custCrdRateLimiter),
 		updateIptablesEipQueue: newTypedRateLimitingQueue("UpdateIptablesEip", custCrdRateLimiter),
 		resetIptablesEipQueue:  newTypedRateLimitingQueue("ResetIptablesEip", custCrdRateLimiter),
-		delIptablesEipQueue:    newTypedRateLimitingQueue("DeleteIptablesEip", custCrdRateLimiter),
+		delIptablesEipQueue:    newTypedRateLimitingQueue[*kubeovnv1.IptablesEIP]("DeleteIptablesEip", nil),
 
 		iptablesFipsLister:     iptablesFipInformer.Lister(),
 		iptablesFipSynced:      iptablesFipInformer.Informer().HasSynced,
@@ -549,7 +565,7 @@ func Run(ctx context.Context, config *Configuration) {
 		addOvnEipQueue:    newTypedRateLimitingQueue("AddOvnEip", custCrdRateLimiter),
 		updateOvnEipQueue: newTypedRateLimitingQueue("UpdateOvnEip", custCrdRateLimiter),
 		resetOvnEipQueue:  newTypedRateLimitingQueue("ResetOvnEip", custCrdRateLimiter),
-		delOvnEipQueue:    newTypedRateLimitingQueue("DeleteOvnEip", custCrdRateLimiter),
+		delOvnEipQueue:    newTypedRateLimitingQueue[*kubeovnv1.OvnEip]("DeleteOvnEip", nil),
 
 		ovnFipsLister:     ovnFipInformer.Lister(),
 		ovnFipSynced:      ovnFipInformer.Informer().HasSynced,
@@ -571,7 +587,7 @@ func Run(ctx context.Context, config *Configuration) {
 
 		csrLister:           csrInformer.Lister(),
 		csrSynced:           csrInformer.Informer().HasSynced,
-		addOrUpdateCsrQueue: newTypedRateLimitingQueue[string]("AddOrUpdateCSR", custCrdRateLimiter),
+		addOrUpdateCsrQueue: newTypedRateLimitingQueue("AddOrUpdateCSR", custCrdRateLimiter),
 
 		addOrUpdateVMIMigrationQueue: newTypedRateLimitingQueue[string]("AddOrUpdateVMIMigration", nil),
 		deleteVMQueue:                newTypedRateLimitingQueue[string]("DeleteVM", nil),
@@ -654,6 +670,13 @@ func Run(ctx context.Context, config *Configuration) {
 		controller.updateBanpQueue = newTypedRateLimitingQueue[*AdminNetworkPolicyChangedDelta]("UpdateBaseAdminNetworkPolicy", nil)
 		controller.deleteBanpQueue = newTypedRateLimitingQueue[*v1alpha1.BaselineAdminNetworkPolicy]("DeleteBaseAdminNetworkPolicy", nil)
 		controller.banpKeyMutex = keymutex.NewHashed(numKeyLocks)
+
+		controller.cnpsLister = cnpInformer.Lister()
+		controller.cnpsSynced = cnpInformer.Informer().HasSynced
+		controller.addCnpQueue = newTypedRateLimitingQueue[string]("AddClusterNetworkPolicy", nil)
+		controller.updateCnpQueue = newTypedRateLimitingQueue[*ClusterNetworkPolicyChangedDelta]("UpdateClusterNetworkPolicy", nil)
+		controller.deleteCnpQueue = newTypedRateLimitingQueue[*netpolv1alpha2.ClusterNetworkPolicy]("DeleteClusterNetworkPolicy", nil)
+		controller.cnpKeyMutex = keymutex.NewHashed(numKeyLocks)
 	}
 
 	if config.EnableDNSNameResolver {
@@ -693,7 +716,7 @@ func Run(ctx context.Context, config *Configuration) {
 		cacheSyncs = append(cacheSyncs, controller.npsSynced)
 	}
 	if controller.config.EnableANP {
-		cacheSyncs = append(cacheSyncs, controller.anpsSynced, controller.banpsSynced)
+		cacheSyncs = append(cacheSyncs, controller.anpsSynced, controller.banpsSynced, controller.cnpsSynced)
 	}
 	if controller.config.EnableDNSNameResolver {
 		cacheSyncs = append(cacheSyncs, controller.dnsNameResolversSynced)
@@ -938,8 +961,19 @@ func Run(ctx context.Context, config *Configuration) {
 			util.LogFatalAndExit(err, "failed to add baseline admin network policy event handler")
 		}
 
-		controller.anpPrioNameMap = make(map[int32]string, 100)
-		controller.anpNamePrioMap = make(map[string]int32, 100)
+		if _, err = cnpInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+			AddFunc:    controller.enqueueAddCnp,
+			UpdateFunc: controller.enqueueUpdateCnp,
+			DeleteFunc: controller.enqueueDeleteCnp,
+		}); err != nil {
+			util.LogFatalAndExit(err, "failed to add cluster network policy event handler")
+		}
+
+		maxPriorityPerMap := util.CnpMaxPriority + 1
+		controller.anpPrioNameMap = make(map[int32]string, maxPriorityPerMap)
+		controller.anpNamePrioMap = make(map[string]int32, maxPriorityPerMap)
+		controller.bnpPrioNameMap = make(map[int32]string, maxPriorityPerMap)
+		controller.bnpNamePrioMap = make(map[string]int32, maxPriorityPerMap)
 	}
 
 	if config.EnableDNSNameResolver {
@@ -1196,6 +1230,10 @@ func (c *Controller) shutdown() {
 		c.addBanpQueue.ShutDown()
 		c.updateBanpQueue.ShutDown()
 		c.deleteBanpQueue.ShutDown()
+
+		c.addCnpQueue.ShutDown()
+		c.updateCnpQueue.ShutDown()
+		c.deleteCnpQueue.ShutDown()
 	}
 
 	if c.config.EnableDNSNameResolver {
@@ -1233,7 +1271,9 @@ func (c *Controller) startWorkers(ctx context.Context) {
 	go wait.Until(runWorker("update subnet route for vpc nat gateway", c.updateVpcSubnetQueue, c.handleUpdateNatGwSubnetRoute), time.Second, ctx.Done())
 	go wait.Until(runWorker("add/update csr", c.addOrUpdateCsrQueue, c.handleAddOrUpdateCsr), time.Second, ctx.Done())
 	// add default and join subnet and wait them ready
-	go wait.Until(runWorker("add/update subnet", c.addOrUpdateSubnetQueue, c.handleAddOrUpdateSubnet), time.Second, ctx.Done())
+	for range c.config.WorkerNum {
+		go wait.Until(runWorker("add/update subnet", c.addOrUpdateSubnetQueue, c.handleAddOrUpdateSubnet), time.Second, ctx.Done())
+	}
 	go wait.Until(runWorker("add/update ippool", c.addOrUpdateIPPoolQueue, c.handleAddOrUpdateIPPool), time.Second, ctx.Done())
 	go wait.Until(runWorker("add vlan", c.addVlanQueue, c.handleAddVlan), time.Second, ctx.Done())
 	go wait.Until(runWorker("add namespace", c.addNamespaceQueue, c.handleAddNamespace), time.Second, ctx.Done())
@@ -1358,6 +1398,7 @@ func (c *Controller) startWorkers(ctx context.Context) {
 	go wait.Until(c.resyncProviderNetworkStatus, 30*time.Second, ctx.Done())
 	go wait.Until(c.exportSubnetMetrics, 30*time.Second, ctx.Done())
 	go wait.Until(c.checkSubnetGateway, 5*time.Second, ctx.Done())
+	go wait.Until(c.syncDistributedSubnetRoutes, 5*time.Second, ctx.Done())
 
 	go wait.Until(runWorker("add ovn eip", c.addOvnEipQueue, c.handleAddOvnEip), time.Second, ctx.Done())
 	go wait.Until(runWorker("update ovn eip", c.updateOvnEipQueue, c.handleUpdateOvnEip), time.Second, ctx.Done())
@@ -1416,6 +1457,10 @@ func (c *Controller) startWorkers(ctx context.Context) {
 		go wait.Until(runWorker("add base admin network policy", c.addBanpQueue, c.handleAddBanp), time.Second, ctx.Done())
 		go wait.Until(runWorker("update base admin network policy", c.updateBanpQueue, c.handleUpdateBanp), time.Second, ctx.Done())
 		go wait.Until(runWorker("delete base admin network policy", c.deleteBanpQueue, c.handleDeleteBanp), time.Second, ctx.Done())
+
+		go wait.Until(runWorker("add cluster network policy", c.addCnpQueue, c.handleAddCnp), time.Second, ctx.Done())
+		go wait.Until(runWorker("update cluster network policy", c.updateCnpQueue, c.handleUpdateCnp), time.Second, ctx.Done())
+		go wait.Until(runWorker("delete cluster network policy", c.deleteCnpQueue, c.handleDeleteCnp), time.Second, ctx.Done())
 	}
 
 	if c.config.EnableDNSNameResolver {
@@ -1529,4 +1574,27 @@ func runWorker[T comparable](action string, queue workqueue.TypedRateLimitingInt
 		for processNextWorkItem(action, queue, handler, getWorkItemKey) {
 		}
 	}
+}
+
+// apiResourceExists checks if all specified kinds exist in the given group version.
+// It returns true if all kinds are found, false otherwise.
+// Parameters:
+// - discoveryClient: The discovery client to use for querying API resources.
+// - gv: The group version string (e.g., "apps/v1").
+// - kinds: A variadic list of kind names to check for existence (e.g., "Deployment", "StatefulSet").
+func apiResourceExists(discoveryClient discovery.DiscoveryInterface, gv string, kinds ...string) (bool, error) {
+	apiResourceLists, err := discoveryClient.ServerResourcesForGroupVersion(gv)
+	if err != nil {
+		if k8serrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("failed to discover api resources for %s: %w", gv, err)
+	}
+
+	existingKinds := set.New[string]()
+	for _, apiResource := range apiResourceLists.APIResources {
+		existingKinds.Insert(apiResource.Kind)
+	}
+
+	return existingKinds.HasAll(kinds...), nil
 }

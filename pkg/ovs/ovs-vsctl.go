@@ -3,6 +3,7 @@ package ovs
 import (
 	"context"
 	"fmt"
+	"maps"
 	"os/exec"
 	"regexp"
 	"slices"
@@ -11,15 +12,36 @@ import (
 	"time"
 
 	"k8s.io/klog/v2"
+	"k8s.io/utils/set"
 
 	"github.com/kubeovn/kube-ovn/pkg/util"
 )
 
-var limiter *Limiter
+var limiter = new(Limiter)
 
-func init() {
-	limiter = new(Limiter)
-}
+var readOnlyCommands = set.New(
+	"",                   // no command specified
+	"show",               // print overview of database contents
+	"list-br",            // print the names of all the bridges
+	"br-exists",          // exit 2 if BRIDGE does not exist
+	"br-to-vlan",         // print the VLAN which BRIDGE is on
+	"br-to-parent",       // print the parent of BRIDGE
+	"br-get-external-id", // print value of KEY on BRIDGE or list key-value pairs on BRIDGE
+	"list-ports",         // print the names of all the ports on BRIDGE
+	"port-to-br",         // print name of bridge that contains PORT
+	"list-ifaces",        // print the names of all interfaces on BRIDGE
+	"iface-to-br",        // print name of bridge that contains IFACE
+	"get-controller",     // print the controllers for BRIDGE
+	"get-fail-mode",      // print the fail-mode for BRIDGE
+	"get-manager",        // print the managers
+	"get-ssl",            // print the SSL configuration
+	"get-aa-mapping",     // get Auto Attach mappings from BRIDGE
+	"list-zone-limits",   // list all limits configured on DATAPATH
+	"list",               // list RECord (or all records) in TBL
+	"find",               // list records satisfying CONDITION in TBL
+	"get",                // print values of COLumns in RECord in TBL
+	"wait-until",         // wait until condition is true
+)
 
 func UpdateOVSVsctlLimiter(c int32) {
 	if c >= 0 {
@@ -34,40 +56,35 @@ func UpdateOVSVsctlLimiter(c int32) {
 var podNetNsRegexp = regexp.MustCompile(`pod_netns="([^"]+)"`)
 
 func Exec(args ...string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-
-	var (
-		start        time.Time
-		elapsed      float64
-		output       []byte
-		method, code string
-		err          error
-	)
-
-	if err = limiter.Wait(ctx); err != nil {
-		klog.V(4).Infof("command %s %s waiting for execution timeout by concurrency limit of %d", OvsVsCtl, strings.Join(args, " "), limiter.Limit())
-		return "", err
-	}
-	defer limiter.Done()
-	klog.V(4).Infof("command %s %s waiting for execution concurrency %d/%d", OvsVsCtl, strings.Join(args, " "), limiter.Current(), limiter.Limit())
-
-	start = time.Now()
-	args = append([]string{"--timeout=30"}, args...)
-	output, err = exec.Command(OvsVsCtl, args...).CombinedOutput()
-	elapsed = float64((time.Since(start)) / time.Millisecond)
-	klog.V(4).Infof("command %s %s in %vms", OvsVsCtl, strings.Join(args, " "), elapsed)
-
-	for _, arg := range args {
-		if !strings.HasPrefix(arg, "--") {
-			method = arg
+	var command string
+	for arg := range slices.Values(args) {
+		if !strings.HasPrefix(arg, "-") {
+			command = arg
 			break
 		}
 	}
 
-	code = "0"
+	if !readOnlyCommands.Has(command) {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+
+		if err := limiter.Wait(ctx); err != nil {
+			klog.V(4).Infof("command %s %s waiting for execution timeout by concurrency limit of %d", OvsVsCtl, strings.Join(args, " "), limiter.Limit())
+			return "", err
+		}
+		defer limiter.Done()
+		klog.V(4).Infof("command %s %s waiting for execution concurrency %d/%d", OvsVsCtl, strings.Join(args, " "), limiter.Current(), limiter.Limit())
+	}
+
+	start := time.Now()
+	args = slices.Insert(args, 0, "--timeout=30")
+	output, err := exec.Command(OvsVsCtl, args...).CombinedOutput()
+	elapsed := float64((time.Since(start)) / time.Millisecond)
+	klog.V(4).Infof("command %s %s in %vms", OvsVsCtl, strings.Join(args, " "), elapsed)
+
+	code := "0"
 	defer func() {
-		ovsClientRequestLatency.WithLabelValues("ovsdb", method, code).Observe(elapsed)
+		ovsClientRequestLatency.WithLabelValues("ovsdb", command, code).Observe(elapsed)
 	}()
 
 	if err != nil {
@@ -77,6 +94,7 @@ func Exec(args ...string) (string, error) {
 	} else if elapsed > 500 {
 		klog.Warningf("ovs-vsctl command took too long: %s %s in %vms", OvsVsCtl, strings.Join(args, " "), elapsed)
 	}
+
 	return trimCommandOutput(output), nil
 }
 
@@ -236,9 +254,11 @@ func ClearPodBandwidth(podName, podNamespace, ifaceID string) error {
 	return nil
 }
 
+var lastInterfacePodMap map[string]string
+
 func ListInterfacePodMap() (map[string]string, error) {
-	output, err := Exec("--data=bare", "--format=csv", "--no-heading", "--columns=name,external_ids,error", "find",
-		"interface", "external_ids:pod_name!=[]", "external_ids:pod_namespace!=[]")
+	output, err := Exec("--data=bare", "--format=csv", "--no-heading", "--columns=name,error,external_ids", "find",
+		"interface", "external_ids:pod_name!=[]", "external_ids:pod_namespace!=[]", "link_state!=up")
 	if err != nil {
 		klog.Errorf("failed to list interface, %v", err)
 		return nil, err
@@ -249,14 +269,14 @@ func ListInterfacePodMap() (map[string]string, error) {
 		if len(strings.TrimSpace(l)) == 0 {
 			continue
 		}
-		parts := strings.Split(strings.TrimSpace(l), ",")
+		parts := strings.SplitN(strings.TrimSpace(l), ",", 3)
 		if len(parts) != 3 {
 			continue
 		}
 		ifaceName := strings.TrimSpace(parts[0])
-		errText := strings.TrimSpace(parts[2])
+		errText := strings.TrimSpace(parts[1])
 		var podNamespace, podName string
-		for externalID := range strings.FieldsSeq(parts[1]) {
+		for externalID := range strings.FieldsSeq(parts[2]) {
 			if strings.Contains(externalID, "pod_name=") {
 				podName = strings.TrimPrefix(strings.TrimSpace(externalID), "pod_name=")
 			}
@@ -267,7 +287,10 @@ func ListInterfacePodMap() (map[string]string, error) {
 		}
 		result[ifaceName] = fmt.Sprintf("%s/%s/%s", podNamespace, podName, errText)
 	}
-	klog.Infof("interface pod map: %v", result)
+	if !maps.Equal(result, lastInterfacePodMap) {
+		klog.Infof("interface pod map: %v", result)
+		lastInterfacePodMap = maps.Clone(result)
+	}
 	return result, nil
 }
 

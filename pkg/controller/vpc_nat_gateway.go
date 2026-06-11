@@ -358,9 +358,10 @@ func (c *Controller) handleInitVpcNatGw(key string) error {
 		}
 	}
 	if err = c.execNatGwRules(pod, natGwInit, interfaces); err != nil {
-		err = fmt.Errorf("failed to init vpc nat gateway, %w", err)
-		klog.Error(err)
-		return err
+		// Check if this is a transient initialization error (e.g., first attempt before iptables chains are created)
+		// The init script may fail on first run but succeed on retry after chains are established
+		klog.Warningf("vpc nat gateway %s init attempt failed (will retry): %v", key, err)
+		return fmt.Errorf("failed to init vpc nat gateway, %w", err)
 	}
 
 	if gw.Spec.QoSPolicy != "" {
@@ -731,21 +732,21 @@ func (c *Controller) execNatGwRules(pod *corev1.Pod, operation string, rules []s
 	}()
 
 	cmd := fmt.Sprintf("bash /kube-ovn/nat-gateway.sh %s %s", operation, strings.Join(rules, " "))
-	klog.V(3).Info(cmd)
+	klog.V(3).Infof("executing NAT gateway command: %s", cmd)
 	stdOutput, errOutput, err := util.ExecuteCommandInContainer(c.config.KubeClient, c.config.KubeRestConfig, pod.Namespace, pod.Name, "vpc-nat-gw", []string{"/bin/bash", "-c", cmd}...)
 	if err != nil {
 		if len(errOutput) > 0 {
-			klog.Errorf("failed to ExecuteCommandInContainer, errOutput: %v", errOutput)
+			klog.Errorf("NAT gateway command failed - stderr: %v", errOutput)
 		}
 		if len(stdOutput) > 0 {
-			klog.V(3).Infof("failed to ExecuteCommandInContainer, stdOutput: %v", stdOutput)
+			klog.Infof("NAT gateway command failed - stdout: %v", stdOutput)
 		}
-		klog.Error(err)
+		klog.Errorf("NAT gateway command execution error: %v", err)
 		return err
 	}
 
 	if len(stdOutput) > 0 {
-		klog.V(3).Infof("ExecuteCommandInContainer stdOutput: %v", stdOutput)
+		klog.V(3).Infof("NAT gateway command succeeded - stdout: %v", stdOutput)
 	}
 
 	if len(errOutput) > 0 {
@@ -788,7 +789,7 @@ func (c *Controller) setNatGwAPIAccess(annotations map[string]string) error {
 
 // setNatGwAPIRoute adds routes to a pod to reach the K8S API server
 func (c *Controller) setNatGwAPIRoute(annotations map[string]string, nadNamespace, nadName string) error {
-	dst := os.Getenv("KUBERNETES_SERVICE_HOST")
+	dst := os.Getenv(util.EnvKubernetesServiceHost)
 
 	protocol := util.CheckProtocol(dst)
 	if !strings.ContainsRune(dst, '/') {
@@ -857,7 +858,11 @@ func (c *Controller) genNatGwStatefulSet(gw *kubeovnv1.VpcNatGateway, oldSts *v1
 		}
 	}
 
-	subnetProvider := util.OvnProvider
+	eth0SubnetProvider, err := c.GetSubnetProvider(gw.Spec.Subnet)
+	if err != nil {
+		klog.Errorf("failed to get gw eth0 valid subnet provider: %v", err)
+		return nil, err
+	}
 	if c.config.EnableNonPrimaryCNI {
 		// We specify NAD using annotations when Kube-OVN is running as a secondary CNI
 		var attachedNetworks string
@@ -870,15 +875,9 @@ func (c *Controller) genNatGwStatefulSet(gw *kubeovnv1.VpcNatGateway, oldSts *v1
 		// Check if we have a subnet provider, if so, use it to set the routes annotation
 		// This is useful when running in secondary CNI mode, as the subnet provider will be the
 		// one that has the routes to the subnet
-		var err error
-		subnetProvider, err = c.GetSubnetProvider(gw.Spec.Subnet)
-		if err != nil {
-			klog.Errorf("%v", err)
-			return nil, err
-		}
-		vpcNatGwNameAnnotation := fmt.Sprintf(util.VpcNatGatewayAnnotationTemplate, subnetProvider)
-		logicalSwitchAnnotation := fmt.Sprintf(util.LogicalSwitchAnnotationTemplate, subnetProvider)
-		ipAddressAnnotation := fmt.Sprintf(util.IPAddressAnnotationTemplate, subnetProvider)
+		vpcNatGwNameAnnotation := fmt.Sprintf(util.VpcNatGatewayAnnotationTemplate, eth0SubnetProvider)
+		logicalSwitchAnnotation := fmt.Sprintf(util.LogicalSwitchAnnotationTemplate, eth0SubnetProvider)
+		ipAddressAnnotation := fmt.Sprintf(util.IPAddressAnnotationTemplate, eth0SubnetProvider)
 		// Merge new annotations with existing ones
 		podAnnotations[nadv1.NetworkAttachmentAnnot] = attachedNetworks
 		podAnnotations[vpcNatGwNameAnnotation] = gw.Name
@@ -904,8 +903,9 @@ func (c *Controller) genNatGwStatefulSet(gw *kubeovnv1.VpcNatGateway, oldSts *v1
 		return nil, err
 	}
 
+	// Configure eth0 (OVN internal network) routes
 	// Retrieve the gateways of the subnet sitting behind the NAT gateway
-	v4Gateway, v6Gateway, err := c.GetGwBySubnet(gw.Spec.Subnet)
+	eth0V4Gateway, eth0V6Gateway, err := c.GetGwBySubnet(gw.Spec.Subnet)
 	if err != nil {
 		klog.Errorf("failed to get gateway ips for subnet %s: %v", gw.Spec.Subnet, err)
 		return nil, err
@@ -915,11 +915,11 @@ func (c *Controller) genNatGwStatefulSet(gw *kubeovnv1.VpcNatGateway, oldSts *v1
 	// It seems like the script inside the NAT GW already does that
 	v4ClusterIPRange, v6ClusterIPRange := util.SplitStringIP(c.config.ServiceClusterIPRange)
 	routes := make([]request.Route, 0, 2)
-	if v4Gateway != "" && v4ClusterIPRange != "" {
-		routes = append(routes, request.Route{Destination: v4ClusterIPRange, Gateway: v4Gateway})
+	if eth0V4Gateway != "" && v4ClusterIPRange != "" {
+		routes = append(routes, request.Route{Destination: v4ClusterIPRange, Gateway: eth0V4Gateway})
 	}
-	if v6Gateway != "" && v6ClusterIPRange != "" {
-		routes = append(routes, request.Route{Destination: v6ClusterIPRange, Gateway: v6Gateway})
+	if eth0V6Gateway != "" && v6ClusterIPRange != "" {
+		routes = append(routes, request.Route{Destination: v6ClusterIPRange, Gateway: eth0V6Gateway})
 	}
 
 	// Add gateway to join every subnet in the same VPC? (is this still needed?)
@@ -933,11 +933,11 @@ func (c *Controller) genNatGwStatefulSet(gw *kubeovnv1.VpcNatGateway, oldSts *v1
 			continue
 		}
 		cidrV4, cidrV6 := util.SplitStringIP(subnet.Spec.CIDRBlock)
-		if cidrV4 != "" && v4Gateway != "" {
-			routes = append(routes, request.Route{Destination: cidrV4, Gateway: v4Gateway})
+		if cidrV4 != "" && eth0V4Gateway != "" {
+			routes = append(routes, request.Route{Destination: cidrV4, Gateway: eth0V4Gateway})
 		}
-		if cidrV6 != "" && v6Gateway != "" {
-			routes = append(routes, request.Route{Destination: cidrV6, Gateway: v6Gateway})
+		if cidrV6 != "" && eth0V6Gateway != "" {
+			routes = append(routes, request.Route{Destination: cidrV6, Gateway: eth0V6Gateway})
 		}
 	}
 
@@ -949,42 +949,46 @@ func (c *Controller) genNatGwStatefulSet(gw *kubeovnv1.VpcNatGateway, oldSts *v1
 		// we will auto-determine the address of the gateway based on the protocol
 		if nexthop == "gateway" {
 			if util.CheckProtocol(route.CIDR) == kubeovnv1.ProtocolIPv4 {
-				nexthop = v4Gateway
+				nexthop = eth0V4Gateway
 			} else {
-				nexthop = v6Gateway
+				nexthop = eth0V6Gateway
 			}
 		}
 
 		routes = append(routes, request.Route{Destination: route.CIDR, Gateway: nexthop})
 	}
 
-	if err = setPodRoutesAnnotation(annotations, subnetProvider, routes); err != nil {
+	if err = setPodRoutesAnnotation(annotations, eth0SubnetProvider, routes); err != nil {
 		klog.Error(err)
 		return nil, err
 	}
 
 	// Set the default routes to the external network
-	subnet, err := c.subnetsLister.Get(util.GetNatGwExternalNetwork(gw.Spec.ExternalSubnets))
+	net1Subnet, err := c.subnetsLister.Get(util.GetNatGwExternalNetwork(gw.Spec.ExternalSubnets))
 	if err != nil {
 		klog.Error(err)
 		return nil, err
 	}
 
 	routes = routes[0:0]
-	v4Gateway, v6Gateway = util.SplitStringIP(subnet.Spec.Gateway)
-	if v4Gateway != "" {
-		routes = append(routes, request.Route{Destination: "0.0.0.0/0", Gateway: v4Gateway})
+	net1V4Gateway, net1V6Gateway := util.SplitStringIP(net1Subnet.Spec.Gateway)
+	if net1V4Gateway != "" {
+		routes = append(routes, request.Route{Destination: "0.0.0.0/0", Gateway: net1V4Gateway})
 	}
-	if v6Gateway != "" {
-		routes = append(routes, request.Route{Destination: "::/0", Gateway: v6Gateway})
+	if net1V6Gateway != "" {
+		routes = append(routes, request.Route{Destination: "::/0", Gateway: net1V6Gateway})
 	}
+	// TODO:// check NAD if has ipam to disable ipam
 	if !gw.Spec.NoDefaultEIP {
-		if err = setPodRoutesAnnotation(annotations, subnet.Spec.Provider, routes); err != nil {
+		if err = setPodRoutesAnnotation(annotations, net1Subnet.Spec.Provider, routes); err != nil {
 			klog.Error(err)
 			return nil, err
 		}
 	} else {
-		annotations[fmt.Sprintf(util.AllocatedAnnotationTemplate, subnet.Spec.Provider)] = "true"
+		// NAT gateway uses no-IPAM mode in network attachment definition when NoDefaultEIP is enabled
+		// This allows macvlan/other CNI plugins to work without IP allocation from Kube-OVN
+		klog.Infof("skipping IP allocation for NAT gateway %s (NoDefaultEIP enabled)", gw.Name)
+		annotations[fmt.Sprintf(util.AllocatedAnnotationTemplate, net1Subnet.Spec.Provider)] = "true"
 	}
 
 	selectors := util.GenNatGwSelectors(gw.Spec.Selector)
@@ -1011,18 +1015,25 @@ func (c *Controller) genNatGwStatefulSet(gw *kubeovnv1.VpcNatGateway, oldSts *v1
 					TerminationGracePeriodSeconds: ptr.To(int64(0)),
 					Containers: []corev1.Container{
 						{
-							Name:            "vpc-nat-gw",
-							Image:           vpcNatImage,
-							Command:         []string{"sleep", "infinity"},
+							Name:    "vpc-nat-gw",
+							Image:   vpcNatImage,
+							Command: []string{"sleep", "infinity"},
+							Lifecycle: &corev1.Lifecycle{
+								PostStart: &corev1.LifecycleHandler{
+									Exec: &corev1.ExecAction{
+										Command: []string{"sh", "-c", "sysctl -w net.ipv4.ip_forward=1"},
+									},
+								},
+							},
 							ImagePullPolicy: corev1.PullIfNotPresent,
 							Env: []corev1.EnvVar{
 								{
 									Name:  "GATEWAY_V4",
-									Value: v4Gateway,
+									Value: net1V4Gateway,
 								},
 								{
 									Name:  "GATEWAY_V6",
-									Value: v6Gateway,
+									Value: net1V6Gateway,
 								},
 							},
 							SecurityContext: &corev1.SecurityContext{
@@ -1046,6 +1057,7 @@ func (c *Controller) genNatGwStatefulSet(gw *kubeovnv1.VpcNatGateway, oldSts *v1
 	if gw.Spec.BgpSpeaker.Enabled {
 		// We need to connect to the K8S API to make the BGP speaker work, this implies a ServiceAccount
 		sts.Spec.Template.Spec.ServiceAccountName = "vpc-nat-gw"
+		sts.Spec.Template.Spec.AutomountServiceAccountToken = ptr.To(true)
 
 		// Craft a BGP speaker container to add to our statefulset
 		bgpSpeakerContainer, err := util.GenNatGwBgpSpeakerContainer(gw.Spec.BgpSpeaker, vpcNatGwBgpSpeakerImage, gw.Name)

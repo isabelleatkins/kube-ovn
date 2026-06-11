@@ -6,17 +6,14 @@ import (
 	"fmt"
 	"net"
 	"os/exec"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
-	dockernetwork "github.com/docker/docker/api/types/network"
+	dockernetwork "github.com/moby/moby/api/types/network"
 	"github.com/onsi/ginkgo/v2"
 	corev1 "k8s.io/api/core/v1"
-	netv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/intstr"
 	clientset "k8s.io/client-go/kubernetes"
 	e2enode "k8s.io/kubernetes/test/e2e/framework/node"
 	e2epodoutput "k8s.io/kubernetes/test/e2e/framework/pod/output"
@@ -199,7 +196,7 @@ var _ = framework.SerialDescribe("[group:underlay]", func() {
 			framework.ExpectNoError(err, "failed to list routes on node %s: %v", node.Name(), err)
 
 			for _, link := range links {
-				if link.Address == node.NetworkSettings.Networks[dockerNetworkName].MacAddress {
+				if link.Address == node.NetworkSettings.Networks[dockerNetworkName].MacAddress.String() {
 					linkMap[node.ID] = &link
 					break
 				}
@@ -413,16 +410,16 @@ var _ = framework.SerialDescribe("[group:underlay]", func() {
 		ginkgo.By("Creating subnet " + subnetName)
 		var cidrV4, cidrV6, gatewayV4, gatewayV6 string
 		for _, config := range dockerNetwork.IPAM.Config {
-			switch util.CheckProtocol(config.Subnet) {
+			switch util.CheckProtocol(config.Subnet.String()) {
 			case apiv1.ProtocolIPv4:
 				if f.HasIPv4() {
-					cidrV4 = config.Subnet
-					gatewayV4 = config.Gateway
+					cidrV4 = config.Subnet.String()
+					gatewayV4 = config.Gateway.String()
 				}
 			case apiv1.ProtocolIPv6:
 				if f.HasIPv6() {
-					cidrV6 = config.Subnet
-					gatewayV6 = config.Gateway
+					cidrV6 = config.Subnet.String()
+					gatewayV6 = config.Gateway.String()
 				}
 			}
 		}
@@ -438,11 +435,11 @@ var _ = framework.SerialDescribe("[group:underlay]", func() {
 		}
 		excludeIPs := make([]string, 0, len(network.Containers)*2)
 		for _, container := range network.Containers {
-			if container.IPv4Address != "" && f.HasIPv4() {
-				excludeIPs = append(excludeIPs, strings.Split(container.IPv4Address, "/")[0])
+			if container.IPv4Address.IsValid() && f.HasIPv4() {
+				excludeIPs = append(excludeIPs, container.IPv4Address.Addr().String())
 			}
-			if container.IPv6Address != "" && f.HasIPv6() {
-				excludeIPs = append(excludeIPs, strings.Split(container.IPv6Address, "/")[0])
+			if container.IPv6Address.IsValid() && f.HasIPv6() {
+				excludeIPs = append(excludeIPs, container.IPv6Address.Addr().String())
 			}
 		}
 		subnet := framework.MakeSubnet(subnetName, vlanName, strings.Join(cidr, ","), strings.Join(gateway, ","), "", "", excludeIPs, nil, []string{namespaceName})
@@ -460,150 +457,6 @@ var _ = framework.SerialDescribe("[group:underlay]", func() {
 		framework.ExpectNoError(err)
 		framework.ExpectHaveLen(links, 1, "should get eth0 information")
 		framework.ExpectEqual(links[0].Mtu, docker.MTU)
-	})
-
-	framework.ConformanceIt("should be able to access underlay pod from node after applying network policy", func() {
-		ginkgo.By("Creating provider network " + providerNetworkName)
-		pn := makeProviderNetwork(providerNetworkName, false, linkMap)
-		_ = providerNetworkClient.CreateSync(pn)
-
-		ginkgo.By("Getting docker network " + dockerNetworkName)
-		network, err := docker.NetworkInspect(dockerNetworkName)
-		framework.ExpectNoError(err, "getting docker network "+dockerNetworkName)
-
-		ginkgo.By("Creating vlan " + vlanName)
-		vlan := framework.MakeVlan(vlanName, providerNetworkName, 0)
-		_ = vlanClient.Create(vlan)
-
-		ginkgo.By("Creating subnet " + subnetName)
-		var cidrV4, cidrV6, gatewayV4, gatewayV6 string
-		for _, config := range dockerNetwork.IPAM.Config {
-			switch util.CheckProtocol(config.Subnet) {
-			case apiv1.ProtocolIPv4:
-				if f.HasIPv4() {
-					cidrV4 = config.Subnet
-					gatewayV4 = config.Gateway
-				}
-			case apiv1.ProtocolIPv6:
-				if f.HasIPv6() {
-					cidrV6 = config.Subnet
-					gatewayV6 = config.Gateway
-				}
-			}
-		}
-		cidr := make([]string, 0, 2)
-		gateway := make([]string, 0, 2)
-		if f.HasIPv4() {
-			cidr = append(cidr, cidrV4)
-			gateway = append(gateway, gatewayV4)
-		}
-		if f.HasIPv6() {
-			cidr = append(cidr, cidrV6)
-			gateway = append(gateway, gatewayV6)
-		}
-		excludeIPs := make([]string, 0, len(network.Containers)*2)
-		for _, container := range network.Containers {
-			if container.IPv4Address != "" && f.HasIPv4() {
-				excludeIPs = append(excludeIPs, strings.Split(container.IPv4Address, "/")[0])
-			}
-			if container.IPv6Address != "" && f.HasIPv6() {
-				excludeIPs = append(excludeIPs, strings.Split(container.IPv6Address, "/")[0])
-			}
-		}
-		subnet := framework.MakeSubnet(subnetName, vlanName, strings.Join(cidr, ","), strings.Join(gateway, ","), "", "", excludeIPs, nil, []string{namespaceName})
-		_ = subnetClient.CreateSync(subnet)
-
-		// set iptables to allow traffic between underlay and node network
-		ginkgo.By("Getting nodes")
-		nodes, err := e2enode.GetReadySchedulableNodes(context.Background(), cs)
-		framework.ExpectNoError(err)
-		framework.ExpectNotEmpty(nodes.Items)
-
-		for _, node := range nodes.Items {
-			for _, address := range node.Status.Addresses {
-				if address.Type == corev1.NodeInternalIP {
-					nodeIP := address.Address
-					if util.CheckProtocol(nodeIP) == apiv1.ProtocolIPv4 {
-						cmd1 := exec.Command("sudo", "iptables", "-t", "filter", "-I", "FORWARD", "-s", nodeIP, "-j", "ACCEPT")
-						if output, err := cmd1.CombinedOutput(); err != nil {
-							framework.Logf("failed to add iptables rule: %v, output: %s", err, string(output))
-						}
-						cmd2 := exec.Command("sudo", "iptables", "-t", "filter", "-I", "FORWARD", "-d", nodeIP, "-j", "ACCEPT")
-						if output, err := cmd2.CombinedOutput(); err != nil {
-							framework.Logf("failed to add iptables rule: %v, output: %s", err, string(output))
-						}
-					} else {
-						cmd1 := exec.Command("sudo", "ip6tables", "-t", "filter", "-I", "FORWARD", "-s", nodeIP, "-j", "ACCEPT")
-						if output, err := cmd1.CombinedOutput(); err != nil {
-							framework.Logf("failed to add ip6tables rule: %v, output: %s", err, string(output))
-						}
-						cmd2 := exec.Command("sudo", "ip6tables", "-t", "filter", "-I", "FORWARD", "-d", nodeIP, "-j", "ACCEPT")
-						if output, err := cmd2.CombinedOutput(); err != nil {
-							framework.Logf("failed to add ip6tables rule: %v, output: %s", err, string(output))
-						}
-					}
-				}
-			}
-		}
-
-		// remove underlay ip on bridge
-		kindNodes, _ := kind.ListNodes(clusterName, "")
-		for _, node := range kindNodes {
-			for _, container := range network.Containers {
-				if container.Name != node.Name() {
-					continue
-				}
-				if container.IPv4Address != "" && f.HasIPv4() {
-					err := iproute.AddressDelCheckExist("br-"+providerNetworkName, container.IPv4Address, node.Exec)
-					framework.ExpectNoError(err)
-				}
-				if container.IPv6Address != "" && f.HasIPv6() {
-					err := iproute.AddressDelCheckExist("br-"+providerNetworkName, container.IPv6Address, node.Exec)
-					framework.ExpectNoError(err)
-				}
-			}
-		}
-
-		ginkgo.By("Creating network policy " + netpolName)
-		netpol := &netv1.NetworkPolicy{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      netpolName,
-				Namespace: namespaceName,
-			},
-			Spec: netv1.NetworkPolicySpec{
-				PodSelector: metav1.LabelSelector{
-					MatchLabels: map[string]string{
-						"app": "agnhost",
-					},
-				},
-				Ingress:     []netv1.NetworkPolicyIngressRule{},
-				PolicyTypes: []netv1.PolicyType{netv1.PolicyTypeIngress},
-			},
-		}
-		_ = netpolClient.Create(netpol)
-
-		ginkgo.By("Creating pod " + podName)
-		labels := map[string]string{
-			"app": "agnhost",
-		}
-		args := []string{"netexec", "--http-port", strconv.Itoa(80)}
-		pod := framework.MakePrivilegedPod(namespaceName, podName, labels, nil, framework.AgnhostImage, nil, args)
-		pod.Spec.Containers[0].ReadinessProbe = &corev1.Probe{
-			ProbeHandler: corev1.ProbeHandler{
-				HTTPGet: &corev1.HTTPGetAction{
-					Port: intstr.FromInt32(80),
-				},
-			},
-		}
-		pod.Spec.Containers[0].LivenessProbe = &corev1.Probe{
-			ProbeHandler: corev1.ProbeHandler{
-				HTTPGet: &corev1.HTTPGetAction{
-					Port: intstr.FromInt32(80),
-				},
-			},
-		}
-
-		_ = podClient.CreateSync(pod)
 	})
 
 	framework.ConformanceIt("should be able to detect duplicate address", func() {
@@ -634,16 +487,16 @@ var _ = framework.SerialDescribe("[group:underlay]", func() {
 		ginkgo.By("Creating subnet " + subnetName)
 		var cidrV4, cidrV6, gatewayV4, gatewayV6 string
 		for _, config := range dockerNetwork.IPAM.Config {
-			switch util.CheckProtocol(config.Subnet) {
+			switch util.CheckProtocol(config.Subnet.String()) {
 			case apiv1.ProtocolIPv4:
 				if f.HasIPv4() {
-					cidrV4 = config.Subnet
-					gatewayV4 = config.Gateway
+					cidrV4 = config.Subnet.String()
+					gatewayV4 = config.Gateway.String()
 				}
 			case apiv1.ProtocolIPv6:
 				if f.HasIPv6() {
-					cidrV6 = config.Subnet
-					gatewayV6 = config.Gateway
+					cidrV6 = config.Subnet.String()
+					gatewayV6 = config.Gateway.String()
 				}
 			}
 		}
@@ -659,11 +512,11 @@ var _ = framework.SerialDescribe("[group:underlay]", func() {
 		}
 		excludeIPs := make([]string, 0, len(network.Containers)*2)
 		for _, container := range network.Containers {
-			if f.HasIPv4() && container.IPv4Address != "" {
-				excludeIPs = append(excludeIPs, strings.Split(container.IPv4Address, "/")[0])
+			if f.HasIPv4() && container.IPv4Address.IsValid() {
+				excludeIPs = append(excludeIPs, container.IPv4Address.Addr().String())
 			}
-			if f.HasIPv6() && container.IPv6Address != "" {
-				excludeIPs = append(excludeIPs, strings.Split(container.IPv6Address, "/")[0])
+			if f.HasIPv6() && container.IPv6Address.IsValid() {
+				excludeIPs = append(excludeIPs, container.IPv6Address.Addr().String())
 			}
 		}
 		subnet := framework.MakeSubnet(subnetName, vlanName, strings.Join(cidr, ","), strings.Join(gateway, ","), "", "", excludeIPs, nil, []string{namespaceName})
@@ -672,10 +525,10 @@ var _ = framework.SerialDescribe("[group:underlay]", func() {
 		networkInfo := containerInfo.NetworkSettings.Networks[dockerNetworkName]
 		ips := make([]string, 0, 2)
 		if f.HasIPv4() {
-			ips = append(ips, networkInfo.IPAddress)
+			ips = append(ips, networkInfo.IPAddress.String())
 		}
 		if f.HasIPv6() {
-			ips = append(ips, networkInfo.GlobalIPv6Address)
+			ips = append(ips, networkInfo.GlobalIPv6Address.String())
 		}
 		ip := strings.Join(ips, ",")
 		mac := networkInfo.MacAddress
@@ -687,9 +540,9 @@ var _ = framework.SerialDescribe("[group:underlay]", func() {
 
 		ginkgo.By("Waiting for pod events")
 		events := eventClient.WaitToHaveEvent("Pod", podName, "Warning", "FailedCreatePodSandBox", "kubelet", "")
-		ip = networkInfo.IPAddress
+		ip = networkInfo.IPAddress.String()
 		if f.IsIPv6() {
-			ip = networkInfo.GlobalIPv6Address
+			ip = networkInfo.GlobalIPv6Address.String()
 		}
 		message := fmt.Sprintf("IP address %s has already been used by host with MAC %s", ip, mac)
 		var found bool
@@ -721,16 +574,16 @@ var _ = framework.SerialDescribe("[group:underlay]", func() {
 		ginkgo.By("Creating underlay subnet " + subnetName)
 		var cidrV4, cidrV6, gatewayV4, gatewayV6 string
 		for _, config := range dockerNetwork.IPAM.Config {
-			switch util.CheckProtocol(config.Subnet) {
+			switch util.CheckProtocol(config.Subnet.String()) {
 			case apiv1.ProtocolIPv4:
 				if f.HasIPv4() {
-					cidrV4 = config.Subnet
-					gatewayV4 = config.Gateway
+					cidrV4 = config.Subnet.String()
+					gatewayV4 = config.Gateway.String()
 				}
 			case apiv1.ProtocolIPv6:
 				if f.HasIPv6() {
-					cidrV6 = config.Subnet
-					gatewayV6 = config.Gateway
+					cidrV6 = config.Subnet.String()
+					gatewayV6 = config.Gateway.String()
 				}
 			}
 		}
@@ -747,11 +600,11 @@ var _ = framework.SerialDescribe("[group:underlay]", func() {
 
 		excludeIPs := make([]string, 0, len(network.Containers)*2)
 		for _, container := range network.Containers {
-			if container.IPv4Address != "" && f.HasIPv4() {
-				excludeIPs = append(excludeIPs, strings.Split(container.IPv4Address, "/")[0])
+			if container.IPv4Address.IsValid() && f.HasIPv4() {
+				excludeIPs = append(excludeIPs, container.IPv4Address.Addr().String())
 			}
-			if container.IPv6Address != "" && f.HasIPv6() {
-				excludeIPs = append(excludeIPs, strings.Split(container.IPv6Address, "/")[0])
+			if container.IPv6Address.IsValid() && f.HasIPv6() {
+				excludeIPs = append(excludeIPs, container.IPv6Address.Addr().String())
 			}
 		}
 
@@ -790,7 +643,7 @@ var _ = framework.SerialDescribe("[group:underlay]", func() {
 		subnet = subnetClient.Get(subnetName)
 		ginkgo.By("1. waiting for U2OInterconnection status of subnet " + subnetName + " to be true")
 		waitSubnetU2OStatus(f, subnetName, subnetClient, true)
-		checkU2OItems(f, subnet, underlayPod, overlayPod, false, providerNetworkName)
+		checkU2OItems(f, subnet, underlayPod, overlayPod, false)
 
 		ginkgo.By("step2: Disable u2o check")
 
@@ -810,7 +663,7 @@ var _ = framework.SerialDescribe("[group:underlay]", func() {
 		subnet = subnetClient.Get(subnetName)
 		ginkgo.By("2. waiting for U2OInterconnection status of subnet " + subnetName + " to be false")
 		waitSubnetU2OStatus(f, subnetName, subnetClient, false)
-		checkU2OItems(f, subnet, underlayPod, overlayPod, false, providerNetworkName)
+		checkU2OItems(f, subnet, underlayPod, overlayPod, false)
 
 		ginkgo.By("step3: Recover enable u2o check")
 
@@ -830,7 +683,7 @@ var _ = framework.SerialDescribe("[group:underlay]", func() {
 		subnet = subnetClient.Get(subnetName)
 		ginkgo.By("3. waiting for U2OInterconnection status of subnet " + subnetName + " to be true")
 		waitSubnetU2OStatus(f, subnetName, subnetClient, true)
-		checkU2OItems(f, subnet, underlayPod, overlayPod, false, providerNetworkName)
+		checkU2OItems(f, subnet, underlayPod, overlayPod, false)
 
 		ginkgo.By("step4: Check if kube-ovn-controller restart")
 
@@ -842,7 +695,7 @@ var _ = framework.SerialDescribe("[group:underlay]", func() {
 		subnet = subnetClient.Get(subnetName)
 		ginkgo.By("4. waiting for U2OInterconnection status of subnet " + subnetName + " to be true")
 		waitSubnetU2OStatus(f, subnetName, subnetClient, true)
-		checkU2OItems(f, subnet, underlayPod, overlayPod, false, providerNetworkName)
+		checkU2OItems(f, subnet, underlayPod, overlayPod, false)
 
 		ginkgo.By("step5: Disable u2o check after restart kube-controller")
 
@@ -862,7 +715,7 @@ var _ = framework.SerialDescribe("[group:underlay]", func() {
 		subnet = subnetClient.Get(subnetName)
 		ginkgo.By("5. waiting for U2OInterconnection status of subnet " + subnetName + " to be false")
 		waitSubnetU2OStatus(f, subnetName, subnetClient, false)
-		checkU2OItems(f, subnet, underlayPod, overlayPod, false, providerNetworkName)
+		checkU2OItems(f, subnet, underlayPod, overlayPod, false)
 
 		ginkgo.By("step6: Recover enable u2o check after restart kube-ovn-controller")
 
@@ -882,7 +735,7 @@ var _ = framework.SerialDescribe("[group:underlay]", func() {
 		subnet = subnetClient.Get(subnetName)
 		ginkgo.By("6. waiting for U2OInterconnection status of subnet " + subnetName + " to be true")
 		waitSubnetU2OStatus(f, subnetName, subnetClient, true)
-		checkU2OItems(f, subnet, underlayPod, overlayPod, false, providerNetworkName)
+		checkU2OItems(f, subnet, underlayPod, overlayPod, false)
 
 		if f.VersionPriorTo(1, 9) {
 			return
@@ -926,7 +779,7 @@ var _ = framework.SerialDescribe("[group:underlay]", func() {
 			subnet = subnetClient.Get(subnetName)
 			ginkgo.By("7. waiting for U2OInterconnection status of subnet " + subnetName + " to be true")
 			waitSubnetU2OStatus(f, subnetName, subnetClient, true)
-			checkU2OItems(f, subnet, underlayPod, overlayPod, false, providerNetworkName)
+			checkU2OItems(f, subnet, underlayPod, overlayPod, false)
 		}
 
 		if f.VersionPriorTo(1, 11) {
@@ -969,7 +822,7 @@ var _ = framework.SerialDescribe("[group:underlay]", func() {
 		subnet = subnetClient.Get(subnetName)
 		ginkgo.By("8. waiting for U2OInterconnection status of subnet " + subnetName + " to be true")
 		waitSubnetU2OStatus(f, subnetName, subnetClient, true)
-		checkU2OItems(f, subnet, underlayPod, podOverlayCustomVPC, true, providerNetworkName)
+		checkU2OItems(f, subnet, underlayPod, podOverlayCustomVPC, true)
 
 		ginkgo.By("step9: Change underlay subnet interconnection to overlay subnet in default vpc")
 
@@ -990,7 +843,7 @@ var _ = framework.SerialDescribe("[group:underlay]", func() {
 		subnet = subnetClient.Get(subnetName)
 		ginkgo.By("9. waiting for U2OInterconnection status of subnet " + subnetName + " to be true")
 		waitSubnetU2OStatus(f, subnetName, subnetClient, true)
-		checkU2OItems(f, subnet, underlayPod, overlayPod, false, providerNetworkName)
+		checkU2OItems(f, subnet, underlayPod, overlayPod, false)
 
 		ginkgo.By("step10: Disable u2o")
 
@@ -1010,7 +863,7 @@ var _ = framework.SerialDescribe("[group:underlay]", func() {
 		subnet = subnetClient.Get(subnetName)
 		ginkgo.By("10. waiting for U2OInterconnection status of subnet " + subnetName + " to be false")
 		waitSubnetU2OStatus(f, subnetName, subnetClient, false)
-		checkU2OItems(f, subnet, underlayPod, overlayPod, false, providerNetworkName)
+		checkU2OItems(f, subnet, underlayPod, overlayPod, false)
 	})
 
 	framework.ConformanceIt(`should drop ARP/ND request from localnet port to LRP`, func() {
@@ -1038,16 +891,16 @@ var _ = framework.SerialDescribe("[group:underlay]", func() {
 		ginkgo.By("Creating underlay subnet " + subnetName)
 		var cidrV4, cidrV6, gatewayV4, gatewayV6 string
 		for _, config := range dockerNetwork.IPAM.Config {
-			switch util.CheckProtocol(config.Subnet) {
+			switch util.CheckProtocol(config.Subnet.String()) {
 			case apiv1.ProtocolIPv4:
 				if f.HasIPv4() {
-					cidrV4 = config.Subnet
-					gatewayV4 = config.Gateway
+					cidrV4 = config.Subnet.String()
+					gatewayV4 = config.Gateway.String()
 				}
 			case apiv1.ProtocolIPv6:
 				if f.HasIPv6() {
-					cidrV6 = config.Subnet
-					gatewayV6 = config.Gateway
+					cidrV6 = config.Subnet.String()
+					gatewayV6 = config.Gateway.String()
 				}
 			}
 		}
@@ -1064,11 +917,11 @@ var _ = framework.SerialDescribe("[group:underlay]", func() {
 
 		excludeIPs := make([]string, 0, len(network.Containers)*2)
 		for _, container := range network.Containers {
-			if container.IPv4Address != "" && f.HasIPv4() {
-				excludeIPs = append(excludeIPs, strings.Split(container.IPv4Address, "/")[0])
+			if container.IPv4Address.IsValid() && f.HasIPv4() {
+				excludeIPs = append(excludeIPs, container.IPv4Address.Addr().String())
 			}
-			if container.IPv6Address != "" && f.HasIPv6() {
-				excludeIPs = append(excludeIPs, strings.Split(container.IPv6Address, "/")[0])
+			if container.IPv6Address.IsValid() && f.HasIPv6() {
+				excludeIPs = append(excludeIPs, container.IPv6Address.Addr().String())
 			}
 		}
 
@@ -1129,15 +982,15 @@ var _ = framework.SerialDescribe("[group:underlay]", func() {
 		ginkgo.By("Creating underlay subnet " + subnetName)
 		var cidrV4, cidrV6, gatewayV4, gatewayV6 string
 		for _, config := range dockerNetwork.IPAM.Config {
-			switch util.CheckProtocol(config.Subnet) {
+			switch util.CheckProtocol(config.Subnet.String()) {
 			case apiv1.ProtocolIPv4:
 				if f.HasIPv4() {
-					cidrV4 = config.Subnet
-					gatewayV4 = config.Gateway
+					cidrV4 = config.Subnet.String()
+					gatewayV4 = config.Gateway.String()
 				}
 			case apiv1.ProtocolIPv6:
-				cidrV6 = config.Subnet
-				gatewayV6 = config.Gateway
+				cidrV6 = config.Subnet.String()
+				gatewayV6 = config.Gateway.String()
 			}
 		}
 
@@ -1152,11 +1005,11 @@ var _ = framework.SerialDescribe("[group:underlay]", func() {
 
 		excludeIPs := make([]string, 0, len(network.Containers)*2)
 		for _, container := range network.Containers {
-			if container.IPv4Address != "" && f.HasIPv4() {
-				excludeIPs = append(excludeIPs, strings.Split(container.IPv4Address, "/")[0])
+			if container.IPv4Address.IsValid() && f.HasIPv4() {
+				excludeIPs = append(excludeIPs, container.IPv4Address.Addr().String())
 			}
-			if container.IPv6Address != "" {
-				excludeIPs = append(excludeIPs, strings.Split(container.IPv6Address, "/")[0])
+			if container.IPv6Address.IsValid() {
+				excludeIPs = append(excludeIPs, container.IPv6Address.Addr().String())
 			}
 		}
 
@@ -1323,91 +1176,9 @@ var _ = framework.SerialDescribe("[group:underlay]", func() {
 			framework.ExpectNoError(err)
 		}
 	})
-
-	framework.ConformanceIt("should create and delete keepSrcMac OpenFlow rules when u2oInterconnection is enabled", func() {
-		f.SkipVersionPriorTo(1, 14, "keepSrcMac OpenFlow rules were introduced in v1.14")
-
-		ginkgo.By("Creating provider network " + providerNetworkName)
-		pn := makeProviderNetwork(providerNetworkName, false, linkMap)
-		_ = providerNetworkClient.CreateSync(pn)
-
-		ginkgo.By("Getting docker network " + dockerNetworkName)
-		network, err := docker.NetworkInspect(dockerNetworkName)
-		framework.ExpectNoError(err, "getting docker network "+dockerNetworkName)
-
-		ginkgo.By("Creating vlan " + vlanName)
-		vlan := framework.MakeVlan(vlanName, providerNetworkName, 0)
-		_ = vlanClient.Create(vlan)
-
-		ginkgo.By("Creating underlay subnet " + subnetName)
-		var cidrV4, cidrV6, gatewayV4, gatewayV6 string
-		for _, config := range dockerNetwork.IPAM.Config {
-			switch util.CheckProtocol(config.Subnet) {
-			case apiv1.ProtocolIPv4:
-				if f.HasIPv4() {
-					cidrV4 = config.Subnet
-					gatewayV4 = config.Gateway
-				}
-			case apiv1.ProtocolIPv6:
-				if f.HasIPv6() {
-					cidrV6 = config.Subnet
-					gatewayV6 = config.Gateway
-				}
-			}
-		}
-		underlayCidr := make([]string, 0, 2)
-		gateway := make([]string, 0, 2)
-		if f.HasIPv4() {
-			underlayCidr = append(underlayCidr, cidrV4)
-			gateway = append(gateway, gatewayV4)
-		}
-		if f.HasIPv6() {
-			underlayCidr = append(underlayCidr, cidrV6)
-			gateway = append(gateway, gatewayV6)
-		}
-
-		excludeIPs := make([]string, 0, len(network.Containers)*2)
-		for _, container := range network.Containers {
-			if container.IPv4Address != "" && f.HasIPv4() {
-				excludeIPs = append(excludeIPs, strings.Split(container.IPv4Address, "/")[0])
-			}
-			if container.IPv6Address != "" && f.HasIPv6() {
-				excludeIPs = append(excludeIPs, strings.Split(container.IPv6Address, "/")[0])
-			}
-		}
-
-		ginkgo.By("Creating underlay subnet with u2oInterconnection enabled " + subnetName)
-		subnet := framework.MakeSubnet(subnetName, vlanName, strings.Join(underlayCidr, ","), strings.Join(gateway, ","), "", "", excludeIPs, nil, []string{namespaceName})
-		subnet.Spec.U2OInterconnection = true
-		_ = subnetClient.CreateSync(subnet)
-
-		ginkgo.By("Waiting for U2OInterconnection status to be ready")
-		waitSubnetU2OStatus(f, subnetName, subnetClient, true)
-
-		ginkgo.By("Creating underlay pod " + u2oPodNameUnderlay)
-		annotations := map[string]string{
-			util.LogicalSwitchAnnotation: subnetName,
-		}
-		args := []string{"netexec", "--http-port", strconv.Itoa(curlListenPort)}
-		underlayPod := framework.MakePod(namespaceName, u2oPodNameUnderlay, nil, annotations, framework.AgnhostImage, nil, args)
-		underlayPod = podClient.CreateSync(underlayPod)
-		waitSubnetStatusUpdate(subnetName, subnetClient, 2)
-
-		ginkgo.By("Verifying keepSrcMac OpenFlow rules exist after pod creation")
-		checkKeepSrcMacFlow(underlayPod, providerNetworkName, true)
-
-		ginkgo.By("Deleting underlay pod " + u2oPodNameUnderlay)
-		podClient.DeleteSync(u2oPodNameUnderlay)
-		waitSubnetStatusUpdate(subnetName, subnetClient, 1)
-
-		ginkgo.By("Verifying keepSrcMac OpenFlow rules are deleted after pod deletion")
-		// Wait a bit for the flow rules to be cleaned up
-		time.Sleep(2 * time.Second)
-		checkKeepSrcMacFlow(underlayPod, providerNetworkName, false)
-	})
 })
 
-func checkU2OItems(f *framework.Framework, subnet *apiv1.Subnet, underlayPod, overlayPod *corev1.Pod, isU2OCustomVpc bool, pnName string) {
+func checkU2OItems(f *framework.Framework, subnet *apiv1.Subnet, underlayPod, overlayPod *corev1.Pod, isU2OCustomVpc bool) {
 	ginkgo.GinkgoHelper()
 
 	ginkgo.By("checking subnet's u2o interconnect ip of underlay subnet " + subnet.Name)
@@ -1558,11 +1329,6 @@ func checkU2OItems(f *framework.Framework, subnet *apiv1.Subnet, underlayPod, ov
 		ginkgo.By("checking overlay pod access to underlay pod v6")
 		checkReachable(overlayPod.Name, overlayPod.Namespace, v6OPodIP, v6UPodIP, strconv.Itoa(curlListenPort), subnet.Spec.U2OInterconnection)
 	}
-
-	if !f.VersionPriorTo(1, 14) {
-		ginkgo.By("Checking keepSrcMac OpenFlow rule")
-		checkKeepSrcMacFlow(underlayPod, pnName, subnet.Spec.U2OInterconnection)
-	}
 }
 
 func checkReachable(podName, podNamespace, sourceIP, targetIP, targetPort string, expectReachable bool) {
@@ -1579,61 +1345,6 @@ func checkReachable(podName, podNamespace, sourceIP, targetIP, targetPort string
 		framework.ExpectEqual(sourceIP, client)
 	} else {
 		framework.ExpectError(err)
-	}
-}
-
-func checkKeepSrcMacFlow(pod *corev1.Pod, providerNetworkName string, expectRules bool) {
-	ginkgo.GinkgoHelper()
-
-	podNodeName := pod.Spec.NodeName
-	framework.Logf("Checking keepSrcMac OpenFlow rule on node %s for Pod %s", podNodeName, pod.Name)
-
-	podMac := pod.Annotations[util.MacAddressAnnotation]
-	if podMac == "" {
-		if !expectRules {
-			return
-		}
-	}
-
-	var ruleFound bool
-	framework.WaitUntil(1*time.Second, 5*time.Second, func(_ context.Context) (bool, error) {
-		nodeCmd := fmt.Sprintf("kubectl ko ofctl %s dump-flows br-%s | grep actions=mod_dl_src:%s | wc -l",
-			podNodeName, providerNetworkName, podMac)
-		output, err := exec.Command("bash", "-c", nodeCmd).CombinedOutput()
-		if err != nil {
-			return false, nil
-		}
-
-		outputStr := string(output)
-		lines := strings.Split(outputStr, "\n")
-		var countStr string
-		for i := len(lines) - 1; i >= 0; i-- {
-			if trimmed := strings.TrimSpace(lines[i]); trimmed != "" {
-				countStr = trimmed
-				break
-			}
-		}
-
-		re := regexp.MustCompile(`\d+`)
-		matches := re.FindStringSubmatch(countStr)
-		countNum := 0
-		if len(matches) > 0 {
-			countNum, _ = strconv.Atoi(matches[0])
-		}
-
-		ruleFound = countNum > 0
-
-		if (expectRules && ruleFound) || (!expectRules && !ruleFound) {
-			return true, nil
-		}
-
-		return false, nil
-	}, "")
-
-	if expectRules {
-		framework.ExpectEqual(ruleFound, true, "keepSrcMac flow rule should exist")
-	} else {
-		framework.ExpectEqual(ruleFound, false, "keepSrcMac flow rule should not exist")
 	}
 }
 

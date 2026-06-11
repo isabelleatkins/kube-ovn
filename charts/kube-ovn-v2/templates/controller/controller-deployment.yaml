@@ -45,15 +45,8 @@ spec:
         - key: CriticalAddonsOnly
           operator: Exists
       affinity:
-        nodeAffinity:
-          preferredDuringSchedulingIgnoredDuringExecution:
-            - preference:
-                matchExpressions:
-                  - key: "ovn.kubernetes.io/ic-gw"
-                    operator: NotIn
-                    values:
-                      - "true"
-              weight: 100
+        {{- $hardcodedPreferred := list (dict "matchExpressions" (list (dict "key" "ovn.kubernetes.io/ic-gw" "operator" "NotIn" "values" (list "true"))) "weight" 100) -}}
+        {{- include "kube-ovn.affinities.nodeAffinity" (dict "hardcodedPreferred" $hardcodedPreferred "userPreferred" .Values.controller.nodeAffinity.preferredDuringSchedulingIgnoredDuringExecution "userRequired" .Values.controller.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution) | nindent 8 }}
         podAntiAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
             - labelSelector:
@@ -62,7 +55,11 @@ spec:
               topologyKey: kubernetes.io/hostname
       priorityClassName: system-cluster-critical
       serviceAccountName: ovn
+      automountServiceAccountToken: true
       hostNetwork: true
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
       initContainers:
         - name: hostpath-init
           image: {{ .Values.global.registry.address }}/{{ .Values.global.images.kubeovn.repository }}:{{ .Values.global.images.kubeovn.tag }}
@@ -146,7 +143,7 @@ spec:
           - --inspect-interval={{- .Values.performance.inspectInterval }}
           - --log_file=/var/log/kube-ovn/kube-ovn-controller.log
           - --log_file_max_size=200
-          - --enable-lb-svc={{- .Values.features.enableLoadbalancer }}
+          - --enable-lb-svc={{- .Values.features.enableLoadbalancerService }}
           - --keep-vm-ip={{- .Values.features.enableKeepVmIps }}
           - --enable-metrics={{- .Values.networking.enableMetrics }}
           - --node-local-dns-ip={{- .Values.networking.nodeLocalDnsIp }}
@@ -180,11 +177,7 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
-            - name: KUBE_NAMESPACE
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.namespace
-            - name: KUBE_NODE_NAME
+            - name: NODE_NAME
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName

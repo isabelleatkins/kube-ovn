@@ -631,7 +631,7 @@ func (c *Controller) setIptables() error {
 	var (
 		v4Rules = []util.IPTableRule{
 			// mark packets from pod to service
-			{Table: NAT, Chain: OvnPrerouting, Rule: strings.Fields(`-i ovn0 -m set --match-set ovn40subnets src -m set --match-set ovn40services dst -j MARK --set-xmark 0x4000/0x4000`)},
+			{Table: NAT, Chain: OvnPrerouting, Rule: strings.Fields(`-i ` + util.NodeNic + ` -m set --match-set ovn40subnets src -m set --match-set ovn40services dst -j MARK --set-xmark 0x4000/0x4000`)},
 			// nat packets marked by kube-proxy or kube-ovn
 			{Table: NAT, Chain: OvnPostrouting, Rule: strings.Fields(`-m mark --mark 0x4000/0x4000 -j ` + OvnMasquerade)},
 			// nat service traffic
@@ -672,7 +672,7 @@ func (c *Controller) setIptables() error {
 		}
 		v6Rules = []util.IPTableRule{
 			// mark packets from pod to service
-			{Table: NAT, Chain: OvnPrerouting, Rule: strings.Fields(`-i ovn0 -m set --match-set ovn60subnets src -m set --match-set ovn60services dst -j MARK --set-xmark 0x4000/0x4000`)},
+			{Table: NAT, Chain: OvnPrerouting, Rule: strings.Fields(`-i ` + util.NodeNic + ` -m set --match-set ovn60subnets src -m set --match-set ovn60services dst -j MARK --set-xmark 0x4000/0x4000`)},
 			// nat packets marked by kube-proxy or kube-ovn
 			{Table: NAT, Chain: OvnPostrouting, Rule: strings.Fields(`-m mark --mark 0x4000/0x4000 -j ` + OvnMasquerade)},
 			// nat service traffic
@@ -741,7 +741,7 @@ func (c *Controller) setIptables() error {
 			return err
 		}
 		if ipsetExists {
-			iptablesRules[0].Rule = strings.Fields(fmt.Sprintf(`-i ovn0 -m set --match-set %s src -m set --match-set %s dst,dst -j MARK --set-xmark 0x4000/0x4000`, matchset, ipset))
+			iptablesRules[0].Rule = strings.Fields(fmt.Sprintf(`-i %s -m set --match-set %s src -m set --match-set %s dst,dst -j MARK --set-xmark 0x4000/0x4000`, util.NodeNic, matchset, ipset))
 			rejectRule := strings.Fields(fmt.Sprintf(`-p tcp -m mark ! --mark 0x4000/0x4000 -m set --match-set %s dst -m conntrack --ctstate NEW -j REJECT`, svcMatchset))
 			obsoleteRejectRule := strings.Fields(fmt.Sprintf(`-m mark ! --mark 0x4000/0x4000 -m set --match-set %s dst -m conntrack --ctstate NEW -j REJECT`, svcMatchset))
 			iptablesRules = append(iptablesRules,
@@ -1188,7 +1188,7 @@ func (c *Controller) cleanObsoleteIptablesRules(protocol string, rules []util.IP
 	var (
 		v4ObsoleteRules = []util.IPTableRule{
 			{Table: NAT, Chain: Postrouting, Rule: strings.Fields(`-m mark --mark 0x40000/0x40000 -j MASQUERADE`)},
-			{Table: "mangle", Chain: Prerouting, Rule: strings.Fields(`-i ovn0 -m set --match-set ovn40subnets src -m set --match-set ovn40services dst -j MARK --set-xmark 0x40000/0x40000`)},
+			{Table: "mangle", Chain: Prerouting, Rule: strings.Fields(`-i ` + util.NodeNic + ` -m set --match-set ovn40subnets src -m set --match-set ovn40services dst -j MARK --set-xmark 0x40000/0x40000`)},
 			// legacy rules
 			// nat packets marked by kube-proxy or kube-ovn
 			{Table: NAT, Chain: Postrouting, Rule: strings.Fields(`-m mark --mark 0x4000/0x4000 -j MASQUERADE`)},
@@ -1205,7 +1205,7 @@ func (c *Controller) cleanObsoleteIptablesRules(protocol string, rules []util.IP
 			// nat outgoing
 			{Table: NAT, Chain: Postrouting, Rule: strings.Fields(`-m set --match-set ovn40subnets-nat src -m set ! --match-set ovn40subnets dst -j MASQUERADE`)},
 			// mark packets from pod to service
-			{Table: "mangle", Chain: Prerouting, Rule: strings.Fields(`-i ovn0 -m set --match-set ovn40subnets src -m set --match-set ovn40services dst -j MARK --set-xmark 0x4000/0x4000`)},
+			{Table: "mangle", Chain: Prerouting, Rule: strings.Fields(`-i ` + util.NodeNic + ` -m set --match-set ovn40subnets src -m set --match-set ovn40services dst -j MARK --set-xmark 0x4000/0x4000`)},
 			// Input Accept
 			{Table: "filter", Chain: "INPUT", Rule: strings.Fields(`-m set --match-set ovn40subnets src -j ACCEPT`)},
 			{Table: "filter", Chain: "INPUT", Rule: strings.Fields(`-m set --match-set ovn40subnets dst -j ACCEPT`)},
@@ -1222,7 +1222,7 @@ func (c *Controller) cleanObsoleteIptablesRules(protocol string, rules []util.IP
 		}
 		v6ObsoleteRules = []util.IPTableRule{
 			{Table: NAT, Chain: Postrouting, Rule: strings.Fields(`-m mark --mark 0x40000/0x40000 -j MASQUERADE`)},
-			{Table: "mangle", Chain: Prerouting, Rule: strings.Fields(`-i ovn0 -m set --match-set ovn60subnets src -m set --match-set ovn60services dst -j MARK --set-xmark 0x40000/0x40000`)},
+			{Table: "mangle", Chain: Prerouting, Rule: strings.Fields(`-i ` + util.NodeNic + ` -m set --match-set ovn60subnets src -m set --match-set ovn60services dst -j MARK --set-xmark 0x40000/0x40000`)},
 			// legacy rules
 			// nat packets marked by kube-proxy or kube-ovn
 			{Table: NAT, Chain: Postrouting, Rule: strings.Fields(`-m mark --mark 0x4000/0x4000 -j MASQUERADE`)},
@@ -1239,7 +1239,7 @@ func (c *Controller) cleanObsoleteIptablesRules(protocol string, rules []util.IP
 			// nat outgoing
 			{Table: NAT, Chain: Postrouting, Rule: strings.Fields(`-m set --match-set ovn60subnets-nat src -m set ! --match-set ovn60subnets dst -j MASQUERADE`)},
 			// mark packets from pod to service
-			{Table: "mangle", Chain: Prerouting, Rule: strings.Fields(`-i ovn0 -m set --match-set ovn60subnets src -m set --match-set ovn60services dst -j MARK --set-xmark 0x4000/0x4000`)},
+			{Table: "mangle", Chain: Prerouting, Rule: strings.Fields(`-i ` + util.NodeNic + ` -m set --match-set ovn60subnets src -m set --match-set ovn60services dst -j MARK --set-xmark 0x4000/0x4000`)},
 			// Input Accept
 			{Table: "filter", Chain: "INPUT", Rule: strings.Fields(`-m set --match-set ovn60subnets src -j ACCEPT`)},
 			{Table: "filter", Chain: "INPUT", Rule: strings.Fields(`-m set --match-set ovn60subnets dst -j ACCEPT`)},
@@ -1317,7 +1317,7 @@ func (c *Controller) cleanObsoleteIptablesRules(protocol string, rules []util.IP
 }
 
 func (c *Controller) setOvnSubnetGatewayMetric() {
-	hostname := os.Getenv(util.HostnameEnv)
+	nodeName := os.Getenv(util.EnvNodeName)
 	for proto, iptables := range c.iptables {
 		rules, err := iptables.ListWithCounters("filter", "FORWARD")
 		if err != nil {
@@ -1389,10 +1389,10 @@ func (c *Controller) setOvnSubnetGatewayMetric() {
 
 			diffPackets := currentPackets - lastPackets
 			diffPacketBytes := currentPacketBytes - lastPacketBytes
-			klog.V(3).Infof(`hostname %s key %s cidr %s direction %s proto %s has diffPackets %d diffPacketBytes %d currentPackets %d currentPacketBytes %d lastPackets %d lastPacketBytes %d`,
-				hostname, key, cidr, direction, proto, diffPackets, diffPacketBytes, currentPackets, currentPacketBytes, lastPackets, lastPacketBytes)
-			metricOvnSubnetGatewayPackets.WithLabelValues(hostname, key, cidr, direction, proto).Add(float64(diffPackets))
-			metricOvnSubnetGatewayPacketBytes.WithLabelValues(hostname, key, cidr, direction, proto).Add(float64(diffPacketBytes))
+			klog.V(3).Infof(`nodeName %s key %s cidr %s direction %s proto %s has diffPackets %d diffPacketBytes %d currentPackets %d currentPacketBytes %d lastPackets %d lastPacketBytes %d`,
+				nodeName, key, cidr, direction, proto, diffPackets, diffPacketBytes, currentPackets, currentPacketBytes, lastPackets, lastPacketBytes)
+			metricOvnSubnetGatewayPackets.WithLabelValues(nodeName, key, cidr, direction, proto).Add(float64(diffPackets))
+			metricOvnSubnetGatewayPacketBytes.WithLabelValues(nodeName, key, cidr, direction, proto).Add(float64(diffPacketBytes))
 		}
 	}
 }
@@ -1568,12 +1568,9 @@ func (c *Controller) getLocalPodIPsNeedPR(protocol string) (map[policyRouteMeta]
 		return nil, err
 	}
 
-	nodeName := os.Getenv(util.HostnameEnv)
 	localPodIPs := make(map[policyRouteMeta][]string)
 	for _, pod := range allPods {
-		if pod.Spec.HostNetwork ||
-			!pod.DeletionTimestamp.IsZero() ||
-			pod.Spec.NodeName != nodeName ||
+		if !pod.DeletionTimestamp.IsZero() ||
 			pod.Annotations[util.LogicalSwitchAnnotation] == "" ||
 			pod.Annotations[util.IPAddressAnnotation] == "" {
 			continue
@@ -1643,33 +1640,46 @@ func (c *Controller) getSubnetsNeedPR(protocol string) (map[policyRouteMeta]stri
 		return nil, err
 	}
 
+	node, err := c.nodesLister.Get(c.config.NodeName)
+	if err != nil {
+		klog.Errorf("failed to get node %s: %v", c.config.NodeName, err)
+		return nil, err
+	}
+
 	for _, subnet := range subnets {
-		if subnet.DeletionTimestamp.IsZero() &&
-			subnet.Spec.ExternalEgressGateway != "" &&
-			(subnet.Spec.Vlan == "" || subnet.Spec.LogicalGateway) &&
-			subnet.Spec.GatewayType == kubeovnv1.GWCentralizedType &&
-			util.GatewayContains(subnet.Spec.GatewayNode, c.config.NodeName) &&
-			subnet.Spec.Vpc == c.config.ClusterRouter &&
-			(subnet.Spec.Protocol == kubeovnv1.ProtocolDual || subnet.Spec.Protocol == protocol) {
-			meta := policyRouteMeta{
-				priority: subnet.Spec.PolicyRoutingPriority,
-				tableID:  subnet.Spec.PolicyRoutingTableID,
-			}
-			egw := strings.Split(subnet.Spec.ExternalEgressGateway, ",")
-			if util.CheckProtocol(subnet.Spec.CIDRBlock) == kubeovnv1.ProtocolDual && protocol == kubeovnv1.ProtocolIPv6 {
-				if len(egw) == 2 {
-					meta.gateway = egw[1]
-				} else if util.CheckProtocol(egw[0]) == protocol {
-					meta.gateway = egw[0]
-				}
-			} else {
+		if !subnet.DeletionTimestamp.IsZero() ||
+			subnet.Spec.ExternalEgressGateway == "" ||
+			(subnet.Spec.Vlan != "" && !subnet.Spec.LogicalGateway) ||
+			subnet.Spec.GatewayType != kubeovnv1.GWCentralizedType ||
+			subnet.Spec.Vpc != c.config.ClusterRouter ||
+			(subnet.Spec.Protocol != kubeovnv1.ProtocolDual && subnet.Spec.Protocol != protocol) {
+			continue
+		}
+
+		isGatewayNode := util.GatewayContains(subnet.Spec.GatewayNode, c.config.NodeName) ||
+			(subnet.Spec.GatewayNode == "" && util.MatchLabelSelectors(subnet.Spec.GatewayNodeSelectors, node.Labels))
+		if !isGatewayNode {
+			continue
+		}
+
+		meta := policyRouteMeta{
+			priority: subnet.Spec.PolicyRoutingPriority,
+			tableID:  subnet.Spec.PolicyRoutingTableID,
+		}
+		egw := strings.Split(subnet.Spec.ExternalEgressGateway, ",")
+		if util.CheckProtocol(subnet.Spec.CIDRBlock) == kubeovnv1.ProtocolDual && protocol == kubeovnv1.ProtocolIPv6 {
+			if len(egw) == 2 {
+				meta.gateway = egw[1]
+			} else if util.CheckProtocol(egw[0]) == protocol {
 				meta.gateway = egw[0]
 			}
-			if meta.gateway != "" {
-				cidrBlock, err := getCidrByProtocol(subnet.Spec.CIDRBlock, protocol)
-				if err == nil && cidrBlock != "" {
-					subnetsNeedPR[meta] = cidrBlock
-				}
+		} else {
+			meta.gateway = egw[0]
+		}
+		if meta.gateway != "" {
+			cidrBlock, err := getCidrByProtocol(subnet.Spec.CIDRBlock, protocol)
+			if err == nil && cidrBlock != "" {
+				subnetsNeedPR[meta] = cidrBlock
 			}
 		}
 	}

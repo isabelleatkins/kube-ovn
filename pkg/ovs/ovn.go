@@ -3,11 +3,16 @@ package ovs
 import (
 	"context"
 	"errors"
+	"fmt"
+	"maps"
 	"reflect"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/ovn-kubernetes/libovsdb/client"
 	"github.com/ovn-kubernetes/libovsdb/model"
+	"github.com/ovn-kubernetes/libovsdb/modelgen"
 	"github.com/ovn-kubernetes/libovsdb/ovsdb"
 	"k8s.io/klog/v2"
 
@@ -25,7 +30,6 @@ type LegacyClient struct {
 
 type OVNNbClient struct {
 	ovsDbClient
-	ClusterRouter string
 }
 
 type OVNSbClient struct {
@@ -55,6 +59,82 @@ func NewLegacyClient(timeout int) *LegacyClient {
 	return &LegacyClient{
 		OvnTimeout: timeout,
 	}
+}
+
+func NewDynamicOvnNbClient(
+	ovnNbAddr string,
+	ovnNbTimeout, ovsDbConTimeout, ovsDbInactivityTimeout int,
+	tables ...string,
+) (*OVNNbClient, map[string]model.Model, error) {
+	dbModel, err := model.NewClientDBModel(ovnnb.DatabaseName, nil)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to create client db model: %w", err)
+	}
+
+	nbClient, err := ovsclient.NewOvsDbClient(
+		ovnnb.DatabaseName,
+		ovnNbAddr,
+		dbModel,
+		nil,
+		ovsDbConTimeout,
+		ovsDbInactivityTimeout,
+	)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to create initial ovsdb client to fetch schema: %w", err)
+	}
+
+	schemaTables := nbClient.Schema().Tables
+	nbClient.Close()
+
+	models := make(map[string]model.Model, len(tables))
+	monitors := make([]client.MonitorOption, 0, len(tables))
+	for name, table := range schemaTables {
+		if len(tables) != 0 && !slices.Contains(tables, name) {
+			continue
+		}
+
+		columns := maps.Clone(table.Columns)
+		keys := slices.Collect(maps.Keys(columns))
+		slices.Sort(keys)
+		sortedColumns := slices.Insert(keys, 0, "_uuid")
+		columns["_uuid"] = &ovsdb.UUIDColumn
+
+		fields := make([]reflect.StructField, 0, len(columns))
+		for column := range slices.Values(sortedColumns) {
+			fields = append(fields, reflect.StructField{
+				Name: modelgen.FieldName(column),
+				Type: ovsdb.NativeType(columns[column]),
+				Tag:  reflect.StructTag(strings.Trim(modelgen.Tag(column), "`")),
+			})
+		}
+
+		model := reflect.New(reflect.StructOf(fields)).Interface().(model.Model)
+		monitors = append(monitors, client.WithTable(model))
+		models[name] = model
+	}
+
+	if dbModel, err = model.NewClientDBModel(ovnnb.DatabaseName, models); err != nil {
+		return nil, nil, fmt.Errorf("failed to create dynamic client db model: %w", err)
+	}
+
+	if nbClient, err = ovsclient.NewOvsDbClient(
+		ovnnb.DatabaseName,
+		ovnNbAddr,
+		dbModel,
+		monitors,
+		ovsDbConTimeout,
+		ovsDbInactivityTimeout,
+	); err != nil {
+		return nil, nil, fmt.Errorf("failed to create dynamic ovsdb client: %w", err)
+	}
+
+	c := &OVNNbClient{
+		ovsDbClient: ovsDbClient{
+			Client:  nbClient,
+			Timeout: time.Duration(ovnNbTimeout) * time.Second,
+		},
+	}
+	return c, models, nil
 }
 
 func NewOvnNbClient(ovnNbAddr string, ovnNbTimeout, ovsDbConTimeout, ovsDbInactivityTimeout, maxRetry int) (*OVNNbClient, error) {
@@ -92,13 +172,15 @@ func NewOvnNbClient(ovnNbAddr string, ovnNbTimeout, ovsDbConTimeout, ovsDbInacti
 		client.WithTable(&ovnnb.NAT{}),
 		client.WithTable(&ovnnb.NBGlobal{}),
 		client.WithTable(&ovnnb.PortGroup{}),
+		client.WithTable(&ovnnb.Meter{}),
+		client.WithTable(&ovnnb.MeterBand{}),
 	}
 
 	try := 0
 	var nbClient client.Client
 	for {
 		nbClient, err = ovsclient.NewOvsDbClient(
-			ovsclient.NBDB,
+			ovnnb.DatabaseName,
 			ovnNbAddr,
 			dbModel,
 			monitors,
@@ -135,13 +217,12 @@ func NewOvnSbClient(ovnSbAddr string, ovnSbTimeout, ovsDbConTimeout, ovsDbInacti
 
 	monitors := []client.MonitorOption{
 		client.WithTable(&ovnsb.Chassis{}),
-		// TODO:// monitor other necessary tables in ovsdb/ovnsb/model.go
 	}
 	try := 0
 	var sbClient client.Client
 	for {
 		sbClient, err = ovsclient.NewOvsDbClient(
-			ovsclient.SBDB,
+			ovnsb.DatabaseName,
 			ovnSbAddr,
 			dbModel,
 			monitors,
@@ -203,9 +284,9 @@ func (c *ovsDbClient) Transact(method string, operations []ovsdb.Operation) erro
 
 	var dbType string
 	switch c.Schema().Name {
-	case "OVN_Northbound":
+	case ovnnb.DatabaseName:
 		dbType = "ovn-nb"
-	case "OVN_Southbound":
+	case ovnsb.DatabaseName:
 		dbType = "ovn-sb"
 	}
 

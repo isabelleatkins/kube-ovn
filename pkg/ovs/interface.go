@@ -8,6 +8,7 @@ import (
 	"github.com/ovn-kubernetes/libovsdb/ovsdb"
 
 	v1alpha1 "sigs.k8s.io/network-policy-api/apis/v1alpha1"
+	v1alpha2 "sigs.k8s.io/network-policy-api/apis/v1alpha2"
 
 	kubeovnv1 "github.com/kubeovn/kube-ovn/pkg/apis/kubeovn/v1"
 	"github.com/kubeovn/kube-ovn/pkg/ovsdb/ovnnb"
@@ -26,6 +27,7 @@ type NBGlobal interface {
 	SetNodeLocalDNSIP(nodeLocalDNSIP string) error
 	SetSkipConntrackCidrs(skipConntrackCidrs string) error
 	GetNbGlobal() (*ovnnb.NBGlobal, error)
+	MigrateVendorExternalIDs() error
 }
 
 type LogicalRouter interface {
@@ -159,11 +161,11 @@ type PortGroup interface {
 }
 
 type ACL interface {
-	UpdateDefaultBlockACLOps(npName, pgName, direction string, loggingEnabled, lax bool) ([]ovsdb.Operation, error)
+	UpdateDefaultBlockACLOps(npName, pgName, direction string, loggingEnabled, lax bool, logRate int) ([]ovsdb.Operation, error)
 	UpdateDefaultBlockExceptionsACLOps(npName, pgName, npNamespace, direction string) ([]ovsdb.Operation, error)
-	UpdateIngressACLOps(pgName, asIngressName, asExceptName, protocol, aclName string, npp []netv1.NetworkPolicyPort, logEnable bool, logACLActions []ovnnb.ACLAction, namedPortMap map[string]*util.NamedPortInfo) ([]ovsdb.Operation, error)
-	UpdateEgressACLOps(pgName, asEgressName, asExceptName, protocol, aclName string, npp []netv1.NetworkPolicyPort, logEnable bool, logACLActions []ovnnb.ACLAction, namedPortMap map[string]*util.NamedPortInfo) ([]ovsdb.Operation, error)
-	CreateGatewayACL(lsName, pgName, gateway, u2oInterconnectionIP string) error
+	UpdateIngressACLOps(pgName, asIngressName, asExceptName, protocol, aclName string, npp []netv1.NetworkPolicyPort, logEnable bool, logACLActions []ovnnb.ACLAction, logRate int, namedPortMap map[string]*util.NamedPortInfo) ([]ovsdb.Operation, error)
+	UpdateEgressACLOps(pgName, asEgressName, asExceptName, protocol, aclName string, npp []netv1.NetworkPolicyPort, logEnable bool, logACLActions []ovnnb.ACLAction, logRate int, namedPortMap map[string]*util.NamedPortInfo) ([]ovsdb.Operation, error)
+	CreateGatewayACL(lsName, pgName string) error
 	CreateNodeACL(pgName, nodeIPStr, joinIPStr string) error
 	CreateSgDenyAllACL(sgName string) error
 	CreateSgBaseACL(sgName, direction string) error
@@ -175,6 +177,7 @@ type ACL interface {
 	DeleteAcls(parentName, parentType, direction string, externalIDs map[string]string) error
 	DeleteAclsOps(parentName, parentType, direction string, externalIDs map[string]string) ([]ovsdb.Operation, error)
 	UpdateAnpRuleACLOps(pgName, asName, protocol, aclName string, priority int, aclAction ovnnb.ACLAction, logACLActions []ovnnb.ACLAction, rulePorts []v1alpha1.AdminNetworkPolicyPort, isIngress, isBanp bool) ([]ovsdb.Operation, error)
+	UpdateCnpRuleACLOps(pgName, asName, protocol, aclName string, priority int, aclAction ovnnb.ACLAction, logACLActions []ovnnb.ACLAction, rulePorts []v1alpha2.ClusterNetworkPolicyPort, isIngress bool, tier int) ([]ovsdb.Operation, error)
 	MigrateACLTier() error
 	CleanNoParentKeyAcls() error
 }
@@ -235,11 +238,19 @@ type DHCPOptions interface {
 	ListDHCPOptions(needVendorFilter bool, externalIDs map[string]string) ([]ovnnb.DHCPOptions, error)
 }
 
+type Meter interface {
+	GetMeter(name string, ignoreNotFound bool) (*ovnnb.Meter, error)
+	MeterExists(name string) (bool, error)
+	CreateOrUpdateMeter(name string, unit ovnnb.MeterUnit, rate, burst int) error
+	DeleteMeter(name string) error
+}
+
 type NbClient interface {
 	ACL
 	AddressSet
 	BFD
 	DHCPOptions
+	Meter
 	GatewayChassis
 	HAChassisGroup
 	LoadBalancer

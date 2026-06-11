@@ -463,8 +463,12 @@ func (c *Controller) reconcileVpcEgressGatewayWorkload(gw *kubeovnv1.VpcEgressGa
 						Name:            "init",
 						Image:           image,
 						ImagePullPolicy: corev1.PullIfNotPresent,
-						Command:         []string{"bash", "/kube-ovn/init-vpc-egress-gateway.sh"},
-						Env:             initEnv,
+						Command: []string{
+							"bash",
+							"-exc",
+							"chmod +t /usr/local/sbin && bash /kube-ovn/init-vpc-egress-gateway.sh",
+						},
+						Env: initEnv,
 						SecurityContext: &corev1.SecurityContext{
 							Privileged: ptr.To(true),
 						},
@@ -491,6 +495,12 @@ func (c *Controller) reconcileVpcEgressGatewayWorkload(gw *kubeovnv1.VpcEgressGa
 							MountPath: "/usr/local/sbin",
 						}},
 					}},
+					SecurityContext: &corev1.PodSecurityContext{
+						SeccompProfile: &corev1.SeccompProfile{
+							Type: corev1.SeccompProfileTypeRuntimeDefault,
+						},
+					},
+					Tolerations: slices.Clone(gw.Spec.Tolerations),
 					Volumes: []corev1.Volume{{
 						Name: "usr-local-sbin",
 						VolumeSource: corev1.VolumeSource{
@@ -553,7 +563,7 @@ func (c *Controller) reconcileVpcEgressGatewayWorkload(gw *kubeovnv1.VpcEgressGa
 	}
 
 	// return the source CIDR blocks for later OVN resources reconciliation
-	deploy.APIVersion, deploy.Kind = deploymentGroupVersion, deploymentKind
+	deploy.APIVersion, deploy.Kind = appsv1.SchemeGroupVersion.String(), util.KindDeployment
 	return attachmentNetworkName, intRouteDstIPv4, intRouteDstIPv6, deploy, nil
 }
 

@@ -2,10 +2,12 @@
 package speaker
 
 import (
+	"net/netip"
 	"strings"
 
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/klog/v2"
+	"k8s.io/utils/set"
 
 	"github.com/kubeovn/kube-ovn/pkg/util"
 )
@@ -53,31 +55,39 @@ func (c *Controller) syncSubnetRoutes() {
 
 	localSubnets := make(map[string]string, 2)
 	for _, subnet := range subnets {
-		if subnet.Status.IsReady() && subnet.Annotations != nil {
-			ips := strings.Split(subnet.Spec.CIDRBlock, ",")
-			policy := subnet.Annotations[util.BgpAnnotation]
-			if policy == "" {
-				continue
-			}
+		if !subnet.Status.IsReady() || len(subnet.Annotations) == 0 {
+			continue
+		}
 
-			switch policy {
-			case "true":
-				fallthrough
-			case announcePolicyCluster:
-				for _, cidr := range ips {
-					ipFamily := util.CheckProtocol(cidr)
-					bgpExpected[ipFamily] = append(bgpExpected[ipFamily], cidr)
+		policy := subnet.Annotations[util.BgpAnnotation]
+		switch policy {
+		case "":
+			continue
+		case "true":
+			fallthrough
+		case announcePolicyCluster:
+			for cidr := range strings.SplitSeq(subnet.Spec.CIDRBlock, ",") {
+				prefix, err := netip.ParsePrefix(cidr)
+				if err != nil {
+					klog.Errorf("failed to parse subnet CIDR %q: %v", cidr, err)
+					continue
 				}
-			case announcePolicyLocal:
-				localSubnets[subnet.Name] = subnet.Spec.CIDRBlock
-			default:
-				klog.Warningf("invalid subnet annotation %s=%s", util.BgpAnnotation, policy)
+
+				if afi := prefixToAFI(prefix); bgpExpected[afi] == nil {
+					bgpExpected[afi] = set.New(prefix.String())
+				} else {
+					bgpExpected[afi].Insert(prefix.String())
+				}
 			}
+		case announcePolicyLocal:
+			localSubnets[subnet.Name] = subnet.Spec.CIDRBlock
+		default:
+			klog.Warningf("invalid subnet annotation %s=%s", util.BgpAnnotation, policy)
 		}
 	}
 
 	for _, pod := range pods {
-		if pod.Spec.HostNetwork || pod.Status.PodIP == "" || len(pod.Annotations) == 0 || !isPodAlive(pod) {
+		if pod.Status.PodIP == "" || len(pod.Annotations) == 0 || !isPodAlive(pod) {
 			continue
 		}
 

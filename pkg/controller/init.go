@@ -30,8 +30,24 @@ import (
 func (c *Controller) InitOVN() error {
 	var err error
 
-	if err = c.migrateACLForVersionCompat(); err != nil {
-		klog.Errorf("failed to sync the older acl : %v", err)
+	// migrate vendor externalIDs to kube-ovn resources created in versions prior to v1.15.0
+	// this must run before ACL cleanup to ensure existing resources are properly tagged
+	if err = c.OVNNbClient.MigrateVendorExternalIDs(); err != nil {
+		klog.Errorf("failed to migrate vendor externalIDs: %v", err)
+		return err
+	}
+
+	// migrate tier field of ACL rules created in versions prior to v1.13.0
+	// after upgrading, the tier field has a default value of zero, which is not the value used in versions >= v1.13.0
+	// we need to migrate the tier field to the correct value
+	if err = c.OVNNbClient.MigrateACLTier(); err != nil {
+		klog.Errorf("failed to migrate ACL tier: %v", err)
+		return err
+	}
+
+	// clean all no parent key acls
+	if err = c.OVNNbClient.CleanNoParentKeyAcls(); err != nil {
+		klog.Errorf("failed to clean all no parent key acls: %v", err)
 		return err
 	}
 
@@ -67,22 +83,6 @@ func (c *Controller) InitOVN() error {
 		return err
 	}
 
-	return nil
-}
-
-func (c *Controller) migrateACLForVersionCompat() error {
-	// migrate tier field of ACL rules created in versions prior to v1.13.0
-	// after upgrading, the tier field has a default value of zero, which is not the value used in versions >= v1.13.0
-	// we need to migrate the tier field to the correct value
-	if err := c.OVNNbClient.MigrateACLTier(); err != nil {
-		klog.Errorf("failed to migrate ACL tier: %v", err)
-		return err
-	}
-	// clean all no parent key acls
-	if err := c.OVNNbClient.CleanNoParentKeyAcls(); err != nil {
-		klog.Errorf("failed to clean all no parent key acls: %v", err)
-		return err
-	}
 	return nil
 }
 
@@ -352,9 +352,7 @@ func (c *Controller) InitIPAM() error {
 	subnetProviderMaps := make(map[string]string, len(subnets))
 	for _, subnet := range subnets {
 		klog.Infof("Init subnet %s", subnet.Name)
-
 		subnetProviderMaps[subnet.Name] = subnet.Spec.Provider
-
 		if err := c.ipam.AddOrUpdateSubnet(subnet.Name, subnet.Spec.CIDRBlock, subnet.Spec.Gateway, subnet.Spec.ExcludeIps); err != nil {
 			klog.Errorf("failed to init subnet %s: %v", subnet.Name, err)
 		}
@@ -363,6 +361,7 @@ func (c *Controller) InitIPAM() error {
 		u2oInterconnLrpName := fmt.Sprintf("%s-%s", subnet.Spec.Vpc, subnet.Name)
 		if subnet.Status.U2OInterconnectionIP != "" {
 			var mac *string
+			klog.Infof("Init U2O for subnet %s", subnet.Name)
 			if subnet.Status.U2OInterconnectionMAC != "" {
 				mac = ptr.To(subnet.Status.U2OInterconnectionMAC)
 			} else {
@@ -375,7 +374,7 @@ func (c *Controller) InitIPAM() error {
 					mac = ptr.To(lrp.MAC)
 				}
 			}
-			if _, _, _, err = c.ipam.GetStaticAddress(u2oInterconnName, u2oInterconnLrpName, subnet.Status.U2OInterconnectionIP, mac, subnet.Name, true); err != nil {
+			if _, _, _, err = c.ipam.GetStaticAddress(u2oInterconnName, u2oInterconnLrpName, subnet.Status.U2OInterconnectionIP, mac, subnet.Name, true, ""); err != nil {
 				klog.Errorf("failed to init subnet %q u2o interconnection ip to ipam %v", subnet.Name, err)
 			}
 		}
@@ -392,12 +391,7 @@ func (c *Controller) InitIPAM() error {
 		}
 	}
 
-	pods, err := c.podsLister.List(labels.Everything())
-	if err != nil {
-		klog.Errorf("failed to list pods: %v", err)
-		return err
-	}
-
+	klog.Infof("Init IPAM from StatefulSet or VM IP CR")
 	ips, err := c.ipsLister.List(labels.Everything())
 	if err != nil {
 		klog.Errorf("failed to list IPs: %v", err)
@@ -411,7 +405,8 @@ func (c *Controller) InitIPAM() error {
 			continue
 		}
 		// recover sts and kubevirt vm ip, other ip recover in later pod loop
-		if ip.Spec.PodType != util.StatefulSet && ip.Spec.PodType != util.VM {
+		if ip.Spec.PodType != util.KindStatefulSet &&
+			ip.Spec.PodType != util.KindVirtualMachine {
 			continue
 		}
 
@@ -421,11 +416,17 @@ func (c *Controller) InitIPAM() error {
 		} else {
 			ipamKey = util.NodeLspName(ip.Spec.PodName)
 		}
-		if _, _, _, err = c.ipam.GetStaticAddress(ipamKey, ip.Name, ip.Spec.IPAddress, &ip.Spec.MacAddress, ip.Spec.Subnet, true); err != nil {
+		if _, _, _, err = c.ipam.GetStaticAddress(ipamKey, ip.Name, ip.Spec.IPAddress, &ip.Spec.MacAddress, ip.Spec.Subnet, true, ""); err != nil {
 			klog.Errorf("failed to init IPAM from IP CR %s: %v", ip.Name, err)
 		}
 	}
 
+	klog.Infof("Init IPAM from pod")
+	pods, err := c.podsLister.List(labels.Everything())
+	if err != nil {
+		klog.Errorf("failed to list pods: %v", err)
+		return err
+	}
 	for _, pod := range pods {
 		if pod.Spec.HostNetwork {
 			continue
@@ -451,7 +452,7 @@ func (c *Controller) InitIPAM() error {
 				portName := ovs.PodNameToPortName(podName, pod.Namespace, podNet.ProviderName)
 				ip := pod.Annotations[fmt.Sprintf(util.IPAddressAnnotationTemplate, podNet.ProviderName)]
 				mac := pod.Annotations[fmt.Sprintf(util.MacAddressAnnotationTemplate, podNet.ProviderName)]
-				_, _, _, err := c.ipam.GetStaticAddress(key, portName, ip, &mac, podNet.Subnet.Name, true)
+				_, _, _, err := c.ipam.GetStaticAddress(key, portName, ip, &mac, podNet.Subnet.Name, true, "")
 				if err != nil {
 					klog.Errorf("failed to init pod %s.%s address %s: %v", podName, pod.Namespace, pod.Annotations[fmt.Sprintf(util.IPAddressAnnotationTemplate, podNet.ProviderName)], err)
 				} else {
@@ -466,6 +467,7 @@ func (c *Controller) InitIPAM() error {
 		}
 	}
 
+	klog.Infof("Init IPAM from vip CR")
 	vips, err := c.virtualIpsLister.List(labels.Everything())
 	if err != nil {
 		klog.Errorf("failed to list vips: %v", err)
@@ -478,11 +480,12 @@ func (c *Controller) InitIPAM() error {
 			continue
 		}
 		portName := ovs.PodNameToPortName(vip.Name, vip.Spec.Namespace, provider)
-		if _, _, _, err = c.ipam.GetStaticAddress(vip.Name, portName, vip.Status.V4ip, &vip.Status.Mac, vip.Spec.Subnet, true); err != nil {
+		if _, _, _, err = c.ipam.GetStaticAddress(vip.Name, portName, vip.Status.V4ip, &vip.Status.Mac, vip.Spec.Subnet, true, ""); err != nil {
 			klog.Errorf("failed to init ipam from vip cr %s: %v", vip.Name, err)
 		}
 	}
 
+	klog.Infof("Init IPAM from iptables EIP CR")
 	eips, err := c.iptablesEipsLister.List(labels.Everything())
 	if err != nil {
 		klog.Errorf("failed to list EIPs: %v", err)
@@ -490,22 +493,24 @@ func (c *Controller) InitIPAM() error {
 	}
 	for _, eip := range eips {
 		externalNetwork := util.GetExternalNetwork(eip.Spec.ExternalSubnet)
-		if _, _, _, err = c.ipam.GetStaticAddress(eip.Name, eip.Name, eip.Status.IP, &eip.Spec.MacAddress, externalNetwork, true); err != nil {
+		if _, _, _, err = c.ipam.GetStaticAddress(eip.Name, eip.Name, eip.Status.IP, &eip.Spec.MacAddress, externalNetwork, true, ""); err != nil {
 			klog.Errorf("failed to init ipam from iptables eip cr %s: %v", eip.Name, err)
 		}
 	}
 
+	klog.Infof("Init IPAM from ovn EIP CR")
 	oeips, err := c.ovnEipsLister.List(labels.Everything())
 	if err != nil {
 		klog.Errorf("failed to list ovn eips: %v", err)
 		return err
 	}
 	for _, oeip := range oeips {
-		if _, _, _, err = c.ipam.GetStaticAddress(oeip.Name, oeip.Name, oeip.Status.V4Ip, &oeip.Status.MacAddress, oeip.Spec.ExternalSubnet, true); err != nil {
+		if _, _, _, err = c.ipam.GetStaticAddress(oeip.Name, oeip.Name, oeip.Status.V4Ip, &oeip.Status.MacAddress, oeip.Spec.ExternalSubnet, true, ""); err != nil {
 			klog.Errorf("failed to init ipam from ovn eip cr %s: %v", oeip.Name, err)
 		}
 	}
 
+	klog.Infof("Init IPAM from node annotation")
 	nodes, err := c.nodesLister.List(labels.Everything())
 	if err != nil {
 		klog.Errorf("failed to list nodes: %v", err)
@@ -517,7 +522,7 @@ func (c *Controller) InitIPAM() error {
 			mac := node.Annotations[util.MacAddressAnnotation]
 			v4IP, v6IP, _, err := c.ipam.GetStaticAddress(portName, portName,
 				node.Annotations[util.IPAddressAnnotation], &mac,
-				node.Annotations[util.LogicalSwitchAnnotation], true)
+				node.Annotations[util.LogicalSwitchAnnotation], true, "")
 			if err != nil {
 				klog.Errorf("failed to init node %s.%s address %s: %v", node.Name, node.Namespace, node.Annotations[util.IPAddressAnnotation], err)
 			}
@@ -669,7 +674,7 @@ func (c *Controller) syncIPCR() error {
 		changed := false
 		ip = ip.DeepCopy()
 		if ipMap.Has(ip.Name) && ip.Spec.PodType == "" {
-			ip.Spec.PodType = util.VM
+			ip.Spec.PodType = util.KindVirtualMachine
 			changed = true
 		}
 
@@ -705,11 +710,7 @@ func (c *Controller) syncSubnetCR() error {
 			klog.Warningf("subnet %s is not ready", subnet.Name)
 			continue
 		}
-		if util.CheckProtocol(subnet.Spec.CIDRBlock) == kubeovnv1.ProtocolDual {
-			subnet, err = c.calcDualSubnetStatusIP(subnet)
-		} else {
-			subnet, err = c.calcSubnetStatusIP(subnet)
-		}
+		subnet, err = c.calcSubnetStatusIP(subnet)
 		if err != nil {
 			klog.Errorf("failed to calculate subnet %s used ip: %v", cachedSubnet.Name, err)
 			return err
@@ -977,6 +978,10 @@ func (c *Controller) syncFinalizers() error {
 	klog.Info("start to sync finalizers")
 	if err := c.syncIPFinalizer(cl); err != nil {
 		klog.Errorf("failed to sync ip finalizer: %v", err)
+		return err
+	}
+	if err := c.syncIPPoolFinalizer(cl); err != nil {
+		klog.Errorf("failed to sync ippool finalizer: %v", err)
 		return err
 	}
 	if err := c.syncOvnDnatFinalizer(cl); err != nil {
